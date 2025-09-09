@@ -409,6 +409,7 @@ class VoucherApp(ctk.CTk):
         bar = ctk.CTkFrame(self)
         bar.pack(fill="x", padx=10, pady=(0,10))
         ctk.CTkButton(bar, text="Add Voucher",       command=self.add_voucher_ui).pack(side="left", padx=8, pady=8)
+        ctk.CTkButton(bar, text="Edit Selected", command=self.edit_selected).pack(side="left", padx=8, pady=8)
         ctk.CTkButton(bar, text="Mark as Collected", command=self.mark_selected).pack(side="left", padx=8, pady=8)
         ctk.CTkButton(bar, text="Open PDF",          command=self.open_pdf).pack(side="left", padx=8, pady=8)
         ctk.CTkButton(bar, text="Manage Staffs",     command=self.manage_staffs_ui).pack(side="left", padx=8, pady=8)
@@ -587,6 +588,108 @@ class VoucherApp(ctk.CTk):
                 os.startfile(pdf_path)
             else:
                 os.system(f"open '{pdf_path}'")
+
+    def edit_selected(self):
+        sel = self.tree.focus()
+        if not sel:
+            messagebox.showerror("Error", "Select a record first."); return
+
+        values = self.tree.item(sel)["values"]
+        if not values:
+            return
+
+        voucher_id = values[0]
+
+        # fetch full record from DB
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("""SELECT voucher_id, customer_name, contact_number, units,
+                              particulars, problem, remark, staff_name
+                       FROM vouchers WHERE voucher_id = ?""", (voucher_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row: return
+
+        # unpack record
+        _, customer_name, contact_number, units, particulars, problem, remark, staff_name = row
+
+        # open edit window
+        top = ctk.CTkToplevel(self)
+        top.title(f"Edit Voucher {voucher_id}")
+        top.geometry("860x620")
+        top.grab_set()
+
+        frm = ctk.CTkFrame(top)
+        frm.pack(fill="both", expand=True, padx=12, pady=12)
+
+        WIDE = 520
+        r = 0
+        ctk.CTkLabel(frm, text="Customer Name").grid(row=r, column=0, sticky="w")
+        e_name = ctk.CTkEntry(frm, width=WIDE)
+        e_name.insert(0, customer_name)
+        e_name.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+
+        ctk.CTkLabel(frm, text="Contact Number").grid(row=r, column=0, sticky="w")
+        e_contact = ctk.CTkEntry(frm, width=WIDE)
+        e_contact.insert(0, contact_number)
+        e_contact.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+
+        ctk.CTkLabel(frm, text="No. of Units").grid(row=r, column=0, sticky="w")
+        e_units = ctk.CTkEntry(frm, width=120)
+        e_units.insert(0, str(units))
+        e_units.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+
+        ctk.CTkLabel(frm, text="Particulars").grid(row=r, column=0, sticky="w")
+        t_part = tk.Text(frm, width=66, height=5)
+        t_part.insert("1.0", particulars or "")
+        t_part.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+
+        ctk.CTkLabel(frm, text="Problem").grid(row=r, column=0, sticky="w")
+        t_prob = tk.Text(frm, width=66, height=4)
+        t_prob.insert("1.0", problem or "")
+        t_prob.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+
+        ctk.CTkLabel(frm, text="Staff").grid(row=r, column=0, sticky="w")
+        staff_values = list_staffs() or [""]
+        e_staff = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
+        e_staff.set(staff_name or "")
+        e_staff.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+
+        ctk.CTkLabel(frm, text="Remark").grid(row=r, column=0, sticky="w")
+        t_remark = tk.Text(frm, width=66, height=4)
+        t_remark.insert("1.0", remark or "")
+        t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+
+    def save_edit():
+        name = e_name.get().strip()
+        contact = e_contact.get().strip()
+        try:
+            units_val = int((e_units.get() or "1").strip())
+        except ValueError:
+            messagebox.showerror("Invalid", "Units must be a number."); return
+        particulars_val = t_part.get("1.0","end").strip()
+        problem_val     = t_prob.get("1.0","end").strip()
+        remark_val      = t_remark.get("1.0","end").strip()
+        staff_val       = e_staff.get().strip()
+
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("""UPDATE vouchers
+                          SET customer_name=?, contact_number=?, units=?, particulars=?,
+                              problem=?, remark=?, staff_name=?
+                        WHERE voucher_id=?""",
+                    (name, contact, units_val, particulars_val,
+                     problem_val, remark_val, staff_val, voucher_id))
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Updated", f"Voucher {voucher_id} updated.")
+        top.destroy()
+        self.perform_search()
+
+    btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=12)
+    ctk.CTkButton(btns, text="Save Changes", command=save_edit, width=160).pack(side="right", padx=6)
+    ctk.CTkButton(btns, text="Cancel", command=top.destroy, width=100).pack(side="right", padx=6)
+
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
