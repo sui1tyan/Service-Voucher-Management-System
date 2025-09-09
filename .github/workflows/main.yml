@@ -1,21 +1,20 @@
-name: Build Service Voucher Management System
+name: Build Service Voucher Management System (Windows EXE)
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch: # allow manual trigger
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -24,11 +23,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install customtkinter reportlab qrcode pillow pandas openpyxl pyinstaller
 
-      - name: Build executable with PyInstaller
+      - name: Build EXE with PyInstaller (exclude AVIF plugin)
         run: |
-          pyinstaller --onefile --noconsole main.py --name ServiceVoucherApp
+          pyinstaller --clean --onefile --noconsole main.py --name ServiceVoucherApp ^
+            --exclude-module pillow_avif ^
+            --exclude-module PIL._avif
 
-      - name: Upload build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ServiceVoucherApp-exe
