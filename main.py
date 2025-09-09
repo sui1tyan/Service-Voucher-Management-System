@@ -16,15 +16,14 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 
-# --------- wrapped text helper (prevents overflow in cells) ----------
+# ---------- Wrapped text helper (keeps text inside cells) ----------
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
-
 _styles = getSampleStyleSheet()
 _styleN = _styles["Normal"]
 
 def draw_wrapped(c, text, x, y, w, h, fontsize=10, bold=False, leading=None):
-    """Draw text wrapped inside (x,y,w,h). y is the *bottom* of the box."""
+    """Draw text wrapped inside box (x,y,w,h). y is bottom."""
     style = _styleN.clone('wrap')
     style.fontName = "Helvetica-Bold" if bold else "Helvetica"
     style.fontSize = fontsize
@@ -38,13 +37,11 @@ DB_FILE   = "vouchers.db"
 PDF_DIR   = "pdfs"
 os.makedirs(PDF_DIR, exist_ok=True)
 
-# Header text (edit to your shop details)
 SHOP_NAME = "TONY.COM"
 SHOP_ADDR = "TB4318, Lot 5, Block 31, Fajar Complex  91000 Tawau Sabah, Malaysia"
 SHOP_TEL  = "Tel : 089-763778, H/P: 0168260533"
 LOGO_PATH = ""  # optional: path to logo image (png/jpg). leave blank to skip
 
-# When DB is empty, first voucher number will start here (e.g., 41000)
 BASE_VOUCHER_NO = 41000
 
 # ------------------ DB ------------------
@@ -77,7 +74,6 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.executescript(BASE_SCHEMA)
-    # Back-compat safety
     for tbl, wanted in {
         "vouchers": [
             ("voucher_id","TEXT"), ("created_at","TEXT"), ("customer_name","TEXT"),
@@ -99,7 +95,6 @@ def init_db():
     conn.close()
 
 def next_voucher_id():
-    """Return next numeric voucher id (41000, 41001, ...)."""
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT MAX(CAST(voucher_id AS INTEGER)) FROM vouchers")
@@ -142,30 +137,31 @@ def delete_staff(name: str):
 def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                   units, remark, particulars, problem, staff_name, created_at):
     """
-    Single voucher on A4; columns sized to match the original paper template:
-    - Left column wide (Customer Name, TEL)
-    - Middle column wide (Particulars, PROBLEM)
-    - Right column narrow (QTY)
+    A4 single voucher. Table matches the original template:
+    - Two body rows (top: CUSTOMER NAME & PARTICULARS; bottom: TEL & PROBLEM)
+    - QTY spans both rows (no internal horizontal line)
+    - Labels and inputs live together in the same cells
     """
     left   = 12*mm
     right  = width - 12*mm
     top_y  = height - 15*mm
     y      = top_y
 
-    # Column widths (approx A4 inner width ~ 186mm)
-    left_col_w   = 82*mm
-    qty_col_w    = 22*mm
+    # Column widths tuned for the printed template
+    # A4 inner ~ 186 mm
+    qty_col_w    = 20*mm
+    left_col_w   = 84*mm   # CUSTOMER NAME / TEL (wide)
     middle_col_w = (right - left) - left_col_w - qty_col_w
 
-    name_col_x = left + left_col_w          # vertical split between left & middle
-    qty_col_x  = right - qty_col_w          # vertical split before QTY
+    name_col_x = left + left_col_w
+    qty_col_x  = right - qty_col_w
 
-    # Row heights
-    header_h  = 9.0*mm
-    body_h    = 12.0*mm  # each body row height
-    rows_total_h = header_h + 3*body_h
+    # Row heights (generous to allow label + wrapped text)
+    row1_h = 20*mm  # CUSTOMER NAME / PARTICULARS
+    row2_h = 20*mm  # TEL / PROBLEM
+    total_h = row1_h + row2_h
 
-    # --- Header (shop) ---
+    # --- Header (shop + title + number + date/time) ---
     if LOGO_PATH and os.path.exists(LOGO_PATH):
         try:
             c.drawImage(LOGO_PATH, left, y-12*mm, width=18*mm, height=18*mm,
@@ -186,78 +182,83 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.drawCentredString((left+right)/2, y - 16.0*mm, "SERVICE VOUCHER")
     c.drawRightString(right, y - 16.0*mm, f"No : {voucher_id}")
 
-    # Date / Time
     c.setFont("Helvetica", 10)
     c.drawString(left, y - 24.0*mm, "Date :")
     c.drawString(left + 18*mm, y - 24.0*mm, created_at[:10])
     c.drawRightString(right - 27*mm, y - 24.0*mm, "Time In :")
     c.drawRightString(right, y - 24.0*mm, created_at[11:19])
 
-    # --- Table (header + 3 rows) ---
-    top_table = y - 28.0*mm
-    bottom_table = top_table - rows_total_h
+    # --- Table frame ---
+    top_table = y - 28*mm
+    bottom_table = top_table - total_h
     # outer box
-    c.rect(left, bottom_table, right-left, rows_total_h, stroke=1, fill=0)
+    c.rect(left, bottom_table, right-left, total_h, stroke=1, fill=0)
     # vertical splits
     c.line(name_col_x, top_table, name_col_x, bottom_table)
     c.line(qty_col_x,  top_table, qty_col_x,  bottom_table)
-    # horizontal lines
-    c.line(left, top_table - header_h, right, top_table - header_h)               # after header
-    c.line(left, top_table - header_h - body_h, right, top_table - header_h - body_h)   # after row1
-    c.line(left, top_table - header_h - 2*body_h, right, top_table - header_h - 2*body_h) # after row2
+    # single horizontal separator ONLY for left+middle columns (not through QTY)
+    mid_y = top_table - row1_h
+    c.line(left, mid_y, qty_col_x, mid_y)  # stop at start of QTY column
 
-    # header titles
+    # --------------- Cells content (merged label + value) ---------------
+    pad = 3*mm
+
+    # Row 1 Left: CUSTOMER NAME (label + value)
     c.setFont("Helvetica-Bold", 10.4)
-    c.drawString(left+2*mm,                  top_table - header_h + 3.2, "CUSTOMER NAME")
-    c.drawCentredString(name_col_x + middle_col_w/2, top_table - header_h + 3.2, "PARTICULARS")
-    c.drawCentredString(qty_col_x + qty_col_w/2,     top_table - header_h + 3.2, "QTY")
+    c.drawString(left + pad, top_table - pad - 8, "CUSTOMER NAME")
+    draw_wrapped(c, customer_name,
+                 left + pad, mid_y + pad,
+                 w=left_col_w - 2*pad, h=row1_h - 2*pad - 10, fontsize=10)
 
-    # ---- Row 1 (customer name / (empty) / qty) ----
-    r1_bottom = top_table - header_h - body_h
-    draw_wrapped(c, customer_name, 
-                 left + 3*mm, r1_bottom + 2, 
-                 w=left_col_w - 6*mm, h=body_h - 4, fontsize=10)
-    c.setFont("Helvetica", 10)
-    c.drawCentredString(qty_col_x + qty_col_w/2, r1_bottom + body_h/2 - 3, str(units or 1))
+    # Row 1 Middle: PARTICULARS
+    c.setFont("Helvetica-Bold", 10.4)
+    c.drawString(name_col_x + pad, top_table - pad - 8, "PARTICULARS")
+    draw_wrapped(c, particulars or "-",
+                 name_col_x + pad, mid_y + pad,
+                 w=middle_col_w - 2*pad, h=row1_h - 2*pad - 10, fontsize=10)
 
-    # ---- Row 2 (TEL / particulars / (keep qty visible in row1 only)) ----
-    r2_bottom = r1_bottom - body_h
-    c.setFont("Helvetica-Bold", 10.2)
-    c.drawString(left + 3*mm, r2_bottom + body_h - 4, "TEL:")
-    draw_wrapped(c, contact_number, 
-                 left + 18*mm, r2_bottom + 2, 
-                 w=left_col_w - 21*mm, h=body_h - 4, fontsize=10)
+    # QTY spanning both rows (single cell)
+    c.setFont("Helvetica-Bold", 10.4)
+    c.drawCentredString(qty_col_x + qty_col_w/2, top_table - pad - 8, "QTY")
+    c.setFont("Helvetica", 11)
+    c.drawCentredString(qty_col_x + qty_col_w/2, bottom_table + total_h/2 - 3, str(units or 1))
 
-    draw_wrapped(c, particulars or "-", 
-                 name_col_x + 3*mm, r2_bottom + 2,
-                 w=middle_col_w - 6*mm, h=body_h - 4, fontsize=10)
+    # Row 2 Left: TEL
+    c.setFont("Helvetica-Bold", 10.4)
+    c.drawString(left + pad, mid_y - pad - 8, "TEL")
+    draw_wrapped(c, contact_number,
+                 left + pad, bottom_table + pad,
+                 w=left_col_w - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # ---- Row 3 (blank left / PROBLEM in middle / blank qty) ----
-    r3_bottom = r2_bottom - body_h
-    c.setFont("Helvetica-Bold", 10.2)
-    c.drawString(name_col_x + 3*mm, r3_bottom + body_h - 4, "PROBLEM:")
-    draw_wrapped(c, problem or "-", 
-                 name_col_x + 22*mm, r3_bottom + 2,
-                 w=middle_col_w - 25*mm, h=body_h - 4, fontsize=10)
+    # Row 2 Middle: PROBLEM
+    c.setFont("Helvetica-Bold", 10.4)
+    c.drawString(name_col_x + pad, mid_y - pad - 8, "PROBLEM")
+    draw_wrapped(c, problem or "-",
+                 name_col_x + pad, bottom_table + pad,
+                 w=middle_col_w - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # ---- Recipient & Staff (outside the table, above signatures) ----
-    y_rec = bottom_table - 9*mm
+    # ---- Recipient line + ack sentence (no Name of Staff) ----
+    y_rec = bottom_table - 9.5*mm
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left, y_rec, "RECIPIENT :")
-    c.line(left + 24*mm, y_rec, left + 110*mm, y_rec)
+    c.line(left + 24*mm, y_rec, left + 110*mm, y_rec)  # signature line
 
-    c.drawString(left + 118*mm, y_rec, "NAME OF STAFF :")
-    c.line(left + 150*mm, y_rec, right, y_rec)
+    # Acknowledgement sentence where "Name of Staff" used to be
+    draw_wrapped(
+        c,
+        "CUSTOMER ACKNOWLEDGE WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND REPAIRED SATISFACTORILY",
+        left + 118*mm, y_rec - 8,  right - (left + 118*mm), 18*mm, fontsize=8.9, leading=10
+    )
 
-    # ---- Remark (outside, above signature) ----
-    y_remark = y_rec - 9.5*mm
+    # ---- Remark outside table ----
+    y_remark = y_rec - 11*mm
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left, y_remark, "REMARK:")
-    draw_wrapped(c, remark or "-", left + 22*mm, y_remark - 9,
+    draw_wrapped(c, remark or "-", left + 22*mm, y_remark - 10,
                  w=(right - (left + 22*mm)), h=18*mm, fontsize=10)
 
-    # ---- Signature lines ----
-    y_sig = y_remark - 20*mm
+    # ---- Signatures ----
+    y_sig = y_remark - 22*mm
     c.line(left, y_sig, left + 60*mm, y_sig)
     c.setFont("Helvetica", 9)
     c.drawString(left, y_sig - 4*mm, "CUSTOMER SIGNATURE")
@@ -265,63 +266,49 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.line(right - 60*mm, y_sig, right, y_sig)
     c.drawString(right - 60*mm, y_sig - 4*mm, "DATE COLLECTED")
 
-    # ---- Disclaimers + QR (bottom-right) ----
+    # ---- Disclaimers + QR ----
     qr_size = 20*mm
     disc_left = left
     disc_right = right - qr_size - 6*mm
     y_disc = y_sig - 8*mm
 
-    c.setFont("Helvetica", 8.7)
-    # Opening line (you asked to include this first)
-    draw_wrapped(c,
-        "CUSTOMER ACKNOWLEDGE WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND REPAIRED SATISFACTORILY",
-        disc_left, y_disc - 12, disc_right - disc_left, 28, fontsize=8.7, leading=10)
-
-    # A / B lines
+    c.setFont("Helvetica", 8.5)
     draw_wrapped(c, "A) We do not hold ourselves responsible for any loss or damage.",
-                 disc_left, y_disc - 26, disc_right - disc_left, 22, fontsize=8.5)
+                 disc_left, y_disc - 10, disc_right - disc_left, 24, fontsize=8.5)
     draw_wrapped(c, "B) We reserve our right to sell off the goods to cover our cost and loss.",
-                 disc_left, y_disc - 38, disc_right - disc_left, 22, fontsize=8.5)
+                 disc_left, y_disc - 22, disc_right - disc_left, 24, fontsize=8.5)
 
-    # Full MINIMUM line (your wording)
     draw_wrapped(c,
         "MINIMUM RM45.00 WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE.",
-        disc_left, y_disc - 54, disc_right - disc_left, 28, fontsize=8.5)
+        disc_left, y_disc - 36, disc_right - disc_left, 28, fontsize=8.5)
 
     draw_wrapped(c, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS",
-                 disc_left, y_disc - 68, disc_right - disc_left, 22, fontsize=8.5)
+                 disc_left, y_disc - 50, disc_right - disc_left, 24, fontsize=8.5)
     draw_wrapped(c, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER",
-                 disc_left, y_disc - 80, disc_right - disc_left, 22, fontsize=8.5)
+                 disc_left, y_disc - 62, disc_right - disc_left, 24, fontsize=8.5)
 
-    # QR code (bottom-right, clear of text)
     try:
         qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{created_at[:10]}"
         qr_img  = qrcode.make(qr_data)
         qr_path = os.path.join(PDF_DIR, f"qr_{voucher_id}.png")
         qr_img.save(qr_path)
-        c.drawImage(qr_path, right - qr_size, y_disc - 86, qr_size, qr_size)  # below disclaimer block
+        c.drawImage(qr_path, right - qr_size, y_disc - 70, qr_size, qr_size)
         os.remove(qr_path)
     except Exception:
         pass
 
 def generate_pdf(voucher_id, customer_name, contact_number, units, remark,
                  particulars, problem, staff_name, status, created_at):
-    """A4 page with a SINGLE voucher."""
     filename = os.path.join(PDF_DIR, f"voucher_{voucher_id}.pdf")
     c = canvas.Canvas(filename, pagesize=A4)
     width, height = A4
-
-    _draw_voucher(
-        c, width, height,
-        voucher_id, customer_name, contact_number,
-        units, remark, particulars, problem, staff_name, created_at
-    )
-
+    _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
+                  units, remark, particulars, problem, staff_name, created_at)
     c.showPage()
     c.save()
     return filename
 
-# ------------------ DB operations ------------------
+# ------------------ DB ops ------------------
 def add_voucher(customer_name, contact_number, units, remark, particulars, problem, staff_name):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -353,13 +340,11 @@ def mark_collected(voucher_id):
     conn.close()
 
 def search_vouchers(filters):
-    """Return list of tuples for the table."""
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, status, remark, pdf_path "
            "FROM vouchers WHERE 1=1")
     params = []
-
     if filters.get("voucher_id"):
         sql += " AND voucher_id LIKE ?"; params.append(f"%{filters['voucher_id']}%")
     if filters.get("name"):
@@ -372,7 +357,6 @@ def search_vouchers(filters):
         sql += " AND created_at <= ?"; params.append(filters["date_to"].strip() + " 23:59:59")
     if filters.get("status") and filters["status"] != "All":
         sql += " AND status = ?"; params.append(filters["status"])
-
     sql += " ORDER BY created_at DESC"
     cur.execute(sql, params)
     rows = cur.fetchall()
@@ -388,10 +372,9 @@ class VoucherApp(ctk.CTk):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
 
-        # ---- Filters row ----
+        # ---- Filters ----
         filt = ctk.CTkFrame(self)
         filt.pack(fill="x", padx=10, pady=(10, 4))
-
         today = datetime.now().strftime("%Y-%m-%d")
 
         self.f_voucher = ctk.CTkEntry(filt, width=130, placeholder_text="VoucherID")
@@ -422,7 +405,7 @@ class VoucherApp(ctk.CTk):
         self.tree.pack(expand=True, fill="both", padx=10, pady=(4, 8))
         self.tree.bind("<Double-1>", lambda e: self.open_pdf())
 
-        # ---- Action bar ----
+        # ---- Actions ----
         bar = ctk.CTkFrame(self)
         bar.pack(fill="x", padx=10, pady=(0,10))
         ctk.CTkButton(bar, text="Add Voucher",       command=self.add_voucher_ui).pack(side="left", padx=8, pady=8)
@@ -432,7 +415,6 @@ class VoucherApp(ctk.CTk):
 
         self.perform_search()
 
-    # ---- Filters ----
     def _get_filters(self):
         return {
             "voucher_id": self.f_voucher.get().strip(),
@@ -462,7 +444,7 @@ class VoucherApp(ctk.CTk):
     def add_voucher_ui(self):
         top = ctk.CTkToplevel(self)
         top.title("Create Voucher")
-        top.geometry("860x620")     # wider window
+        top.geometry("860x620")
         top.grab_set()
 
         frm = ctk.CTkFrame(top)
@@ -497,8 +479,7 @@ class VoucherApp(ctk.CTk):
         ctk.CTkLabel(frm, text="Remark", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
         t_remark = tk.Text(frm, width=66, height=4); t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8))
 
-        btns = ctk.CTkFrame(top)
-        btns.pack(fill="x", padx=12, pady=(0,12))
+        btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=(0,12))
 
         def save():
             name = e_name.get().strip()
@@ -524,29 +505,31 @@ class VoucherApp(ctk.CTk):
 
         ctk.CTkButton(btns, text="Save & Open PDF", command=save, width=180).pack(side="right")
 
-    # ---- Manage Staffs (tidy layout) ----
+    # ---- Manage Staffs (tidy) ----
     def manage_staffs_ui(self):
         top = ctk.CTkToplevel(self)
         top.title("Manage Staffs")
-        top.geometry("640x460")
+        top.geometry("680x480")
         top.grab_set()
 
         root = ctk.CTkFrame(top)
         root.pack(fill="both", expand=True, padx=14, pady=14)
-        root.grid_rowconfigure(1, weight=1)
+        root.grid_rowconfigure(2, weight=1)
         root.grid_columnconfigure(0, weight=1)
         root.grid_columnconfigure(1, weight=0)
 
-        # Top input row
         entry = ctk.CTkEntry(root, placeholder_text="New staff name")
         entry.grid(row=0, column=0, sticky="ew", padx=(0,10), pady=(0,10))
 
-        add_btn = ctk.CTkButton(root, text="Add", width=100)
-        add_btn.grid(row=0, column=1, sticky="e", pady=(0,10))
+        row1 = ctk.CTkFrame(root)
+        row1.grid(row=1, column=0, sticky="w", padx=(0,10), pady=(0,10))
+        add_btn = ctk.CTkButton(row1, text="Add", width=120)
+        del_btn = ctk.CTkButton(row1, text="Delete Selected", width=160)
+        add_btn.pack(side="left", padx=(0,10))
+        del_btn.pack(side="left")
 
-        # List with scrollbar
         list_frame = ctk.CTkFrame(root)
-        list_frame.grid(row=1, column=0, sticky="nsew", padx=(0,10))
+        list_frame.grid(row=2, column=0, sticky="nsew", padx=(0,10))
         list_frame.grid_rowconfigure(0, weight=1)
         list_frame.grid_columnconfigure(0, weight=1)
 
@@ -556,17 +539,8 @@ class VoucherApp(ctk.CTk):
         sb.grid(row=0, column=1, sticky="ns")
         lb.configure(yscrollcommand=sb.set)
 
-        # Right-side buttons
-        buttons = ctk.CTkFrame(root)
-        buttons.grid(row=1, column=1, sticky="n")
-        del_btn = ctk.CTkButton(buttons, text="Delete Selected", width=140)
-        del_btn.pack(pady=(0,10))
-        refresh_btn = ctk.CTkButton(buttons, text="Refresh", width=140)
-        refresh_btn.pack()
-
-        # Bottom row with Close
         close_btn = ctk.CTkButton(root, text="Close", width=120, command=top.destroy)
-        close_btn.grid(row=2, column=1, sticky="e", pady=(12,0))
+        close_btn.grid(row=3, column=1, sticky="e", pady=(10,0))
 
         def refresh_list():
             lb.delete(0, "end")
@@ -587,8 +561,6 @@ class VoucherApp(ctk.CTk):
 
         add_btn.configure(command=do_add)
         del_btn.configure(command=do_del)
-        refresh_btn.configure(command=refresh_list)
-
         refresh_list()
 
     # ---- Row actions ----
