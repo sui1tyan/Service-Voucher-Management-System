@@ -1,0 +1,35 @@
+name: Build Service Voucher Management System
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # allow manual trigger
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install customtkinter reportlab qrcode pillow pandas openpyxl pyinstaller
+
+      - name: Build executable with PyInstaller
+        run: |
+          pyinstaller --onefile --noconsole main.py --name ServiceVoucherApp
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ServiceVoucherApp
+          path: dist/ServiceVoucherApp*
