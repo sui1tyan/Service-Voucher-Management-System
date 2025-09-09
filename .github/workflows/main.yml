@@ -1,4 +1,4 @@
-name: Build Service Voucher Management System (Windows EXE)
+name: Build Service Voucher Management System (Windows)
 
 on:
   push:
@@ -16,18 +16,50 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # PyInstaller is currently most stable on 3.11
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install customtkinter reportlab qrcode pillow pandas openpyxl pyinstaller
 
-      - name: Build EXE with PyInstaller
-        run: pyinstaller --clean --onefile --noconsole main.py --name ServiceVoucherApp --exclude-module pillow_avif --exclude-module PIL._avif
+      # ---------------- ONEDIR (recommended) ----------------
+      - name: Build ONEDIR
+        run: |
+          pyinstaller --clean --onedir --noconsole main.py --name ServiceVoucherApp `
+            --exclude-module pillow_avif `
+            --exclude-module PIL._avif `
+            --noupx
 
-      - name: Upload artifact
+      - name: Zip ONEDIR artifact
+        run: |
+          Compress-Archive -Path "dist/ServiceVoucherApp/*" -DestinationPath "dist/ServiceVoucherApp_onedir.zip"
+
+      - name: Upload ONEDIR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ServiceVoucherApp-exe
+          name: ServiceVoucherApp-onedir
+          path: dist/ServiceVoucherApp_onedir.zip
+
+      # ---------------- ONEFILE (alternative) ----------------
+      - name: Prepare custom runtime temp dir (for ONEFILE)
+        run: |
+          $TMPDIR = "$env:LOCALAPPDATA\Temp\svcapp"
+          New-Item -ItemType Directory -Force -Path $TMPDIR | Out-Null
+          echo "TMPDIR=$TMPDIR" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build ONEFILE (tries to avoid extraction errors)
+        run: |
+          pyinstaller --clean --onefile --noconsole main.py --name ServiceVoucherApp `
+            --exclude-module pillow_avif `
+            --exclude-module PIL._avif `
+            --noupx `
+            --runtime-tmpdir "$env:TMPDIR"
+
+      - name: Upload ONEFILE artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ServiceVoucherApp-onefile
           path: dist/ServiceVoucherApp.exe
