@@ -280,7 +280,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
 
     draw_wrapped(c,
         "MINIMUM RM45.00 WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE.",
-        disc_left, y_disc - 44, disc_right - disc_left, 28, fontsize=8.5)
+        disc_left, y_disc - 50, disc_right - disc_left, 28, fontsize=8.5)
 
     draw_wrapped(c, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS",
                  disc_left, y_disc - 62, disc_right - disc_left, 24, fontsize=8.5)
