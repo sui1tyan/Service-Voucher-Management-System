@@ -16,6 +16,22 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 
+from reportlab.platypus import Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
+
+styles = getSampleStyleSheet()
+styleN = styles["Normal"]
+
+def draw_wrapped(c, text, x, y, w, h, fontsize=10):
+    """Draw text wrapped inside a bounding box."""
+    style = styleN.clone('wrap')
+    style.fontName = "Helvetica"
+    style.fontSize = fontsize
+    style.leading = fontsize + 2
+    para = Paragraph(text or "-", style)
+    para.wrapOn(c, w, h)
+    para.drawOn(c, x, y)
+
 # ------------------ Config ------------------
 DB_FILE   = "vouchers.db"
 PDF_DIR   = "pdfs"
