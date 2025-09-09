@@ -659,36 +659,36 @@ class VoucherApp(ctk.CTk):
         t_remark = tk.Text(frm, width=66, height=4)
         t_remark.insert("1.0", remark or "")
         t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+        
+        def save_edit():
+            name = e_name.get().strip()
+            contact = e_contact.get().strip()
+            try:
+                units_val = int((e_units.get() or "1").strip())
+            except ValueError:
+                messagebox.showerror("Invalid", "Units must be a number."); return
+            particulars_val = t_part.get("1.0","end").strip()
+            problem_val     = t_prob.get("1.0","end").strip()
+            remark_val      = t_remark.get("1.0","end").strip()
+            staff_val       = e_staff.get().strip()
 
-    def save_edit():
-        name = e_name.get().strip()
-        contact = e_contact.get().strip()
-        try:
-            units_val = int((e_units.get() or "1").strip())
-        except ValueError:
-            messagebox.showerror("Invalid", "Units must be a number."); return
-        particulars_val = t_part.get("1.0","end").strip()
-        problem_val     = t_prob.get("1.0","end").strip()
-        remark_val      = t_remark.get("1.0","end").strip()
-        staff_val       = e_staff.get().strip()
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("""UPDATE vouchers
+                              SET customer_name=?, contact_number=?, units=?, particulars=?,
+                                  problem=?, remark=?, staff_name=?
+                            WHERE voucher_id=?""",
+                        (name, contact, units_val, particulars_val,
+                         problem_val, remark_val, staff_val, voucher_id))
+            conn.commit()
+            conn.close()
+            messagebox.showinfo("Updated", f"Voucher {voucher_id} updated.")
+            top.destroy()
+            self.perform_search()
 
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute("""UPDATE vouchers
-                          SET customer_name=?, contact_number=?, units=?, particulars=?,
-                              problem=?, remark=?, staff_name=?
-                        WHERE voucher_id=?""",
-                    (name, contact, units_val, particulars_val,
-                     problem_val, remark_val, staff_val, voucher_id))
-        conn.commit()
-        conn.close()
-        messagebox.showinfo("Updated", f"Voucher {voucher_id} updated.")
-        top.destroy()
-        self.perform_search()
-
-    btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=12)
-    ctk.CTkButton(btns, text="Save Changes", command=save_edit, width=160).pack(side="right", padx=6)
-    ctk.CTkButton(btns, text="Cancel", command=top.destroy, width=100).pack(side="right", padx=6)
+        btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=12)
+        ctk.CTkButton(btns, text="Save Changes", command=save_edit, width=160).pack(side="right", padx=6)
+        ctk.CTkButton(btns, text="Cancel", command=top.destroy, width=100).pack(side="right", padx=6)
 
 
 # ------------------ Run ------------------
