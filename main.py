@@ -276,16 +276,16 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     draw_wrapped(c, "A) We do not hold ourselves responsible for any loss or damage.",
                  disc_left, y_disc - 10, disc_right - disc_left, 24, fontsize=8.5)
     draw_wrapped(c, "B) We reserve our right to sell off the goods to cover our cost and loss.",
-                 disc_left, y_disc - 22, disc_right - disc_left, 24, fontsize=8.5)
+                 disc_left, y_disc - 26, disc_right - disc_left, 24, fontsize=8.5)
 
     draw_wrapped(c,
         "MINIMUM RM45.00 WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE.",
-        disc_left, y_disc - 36, disc_right - disc_left, 28, fontsize=8.5)
+        disc_left, y_disc - 44, disc_right - disc_left, 28, fontsize=8.5)
 
     draw_wrapped(c, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS",
-                 disc_left, y_disc - 50, disc_right - disc_left, 24, fontsize=8.5)
-    draw_wrapped(c, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER",
                  disc_left, y_disc - 62, disc_right - disc_left, 24, fontsize=8.5)
+    draw_wrapped(c, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER",
+                 disc_left, y_disc - 74, disc_right - disc_left, 24, fontsize=8.5)
 
     try:
         qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{created_at[:10]}"
