@@ -7,8 +7,8 @@ on:
   workflow_dispatch: # allow manual trigger
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-windows:
+    runs-on: windows-latest
 
     steps:
       - name: Checkout code
@@ -31,5 +31,5 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ServiceVoucherApp
-          path: dist/ServiceVoucherApp*
+          name: ServiceVoucherApp-exe
+          path: dist/ServiceVoucherApp.exe
