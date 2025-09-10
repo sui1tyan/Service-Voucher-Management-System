@@ -4,6 +4,7 @@
 # Run:  python main.py
 
 import os
+import sys
 import sqlite3
 import webbrowser
 from datetime import datetime
@@ -143,14 +144,7 @@ def delete_staff(name: str):
 def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                   units, remark, particulars, problem, staff_name, created_at):
     """
-    A4 single voucher matching your printed template:
-    - 2-row table (row1: CUSTOMER NAME + PARTICULARS, row2: TEL + PROBLEM)
-    - QTY is one tall cell spanning both rows
-    - Labels & values share the same cell
-    - 'Recipient' line + acknowledgement sentence to the right
-    - 'Remark' outside table
-    - Signature + Date Collected on the same line
-    - Bottom disclaimers including highlighted RM60.00
+    A4 single voucher matching your printed template (half-page friendly).
     """
 
     # Page frame
@@ -159,7 +153,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     top_y  = height - 15*mm
     y      = top_y
 
-    # Column widths (tuned for your original print)
+    # Column widths (tuned for your print)
     qty_col_w    = 20*mm
     left_col_w   = 84*mm
     middle_col_w = (right - left) - left_col_w - qty_col_w
@@ -167,7 +161,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     name_col_x = left + left_col_w
     qty_col_x  = right - qty_col_w
 
-    # Row heights (tighter to fit half A4)
+    # Row heights
     row1_h = 20*mm
     row2_h = 20*mm
     total_h = row1_h + row2_h
@@ -268,8 +262,14 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     draw_wrapped(c, remark or "-", left + 22*mm, y_remark - 10,
                  w=(right - (left + 22*mm)), h=18*mm, fontsize=10)
 
-    # ---- Signatures (same line) ----
-    y_sig = y_remark - 20*mm
+    # ===== Tighten bottom block spacing (move up) =====
+    # Tweak these 3 constants to nudge things if you want:
+    GAP_REMARK_TO_SIG = 12*mm   # was 20mm -> pulled up
+    GAP_SIG_TO_DISC   = 6*mm    # was 10mm -> pulled up
+    QR_TOP_OFFSET     = 44      # was 50 -> QR sits a bit higher
+
+    # ---- Signatures ----
+    y_sig = y_remark - GAP_REMARK_TO_SIG
     c.line(left, y_sig, left + 60*mm, y_sig)
     c.setFont("Helvetica", 9)
     c.drawString(left, y_sig - 4*mm, "CUSTOMER SIGNATURE")
@@ -277,23 +277,22 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.line(right - 60*mm, y_sig, right, y_sig)
     c.drawString(right - 60*mm, y_sig - 4*mm, "DATE COLLECTED")
 
-    # ---- Disclaimers + QR (tight, tidy, fits half A4) ----
+    # ---- Disclaimers + QR (tighter, aligned with your screenshot) ----
     qr_size = 20*mm
     disc_left = left
-    y_disc = y_sig - 10*mm
+    y_disc = y_sig - GAP_SIG_TO_DISC
 
     c.setFont("Helvetica", 8.5)
     c.drawString(disc_left, y_disc, "Kindly collect your goods within 60 days from date of sending for repair.")
     c.drawString(disc_left, y_disc - 12, "A) We do not hold ourselves responsible for any loss or damage.")
     c.drawString(disc_left, y_disc - 24, "B) We reserve our right to sell off the goods to cover our cost and loss.")
 
-    # Highlighted RM60.00 in red (split into two rows, smaller font)
-    text1 = "MINIMUM "
-    text2 = "RM60.00"
+    # RM60.00 line split into two rows, slightly smaller
+    text1  = "MINIMUM "
+    text2  = "RM60.00"
     text3a = " WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE"
     text3b = "ON ALL KIND OF HARDWARE AND SOFTWARE."
 
-    # First row
     c.setFont("Helvetica", 7.5)
     c.drawString(disc_left, y_disc - 40, text1)
     c.setFillColorRGB(1, 0, 0)
@@ -301,23 +300,20 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.drawString(disc_left + c.stringWidth(text1, "Helvetica", 7.5), y_disc - 40, text2)
     c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica", 7.5)
-    c.drawString(disc_left + c.stringWidth(text1, "Helvetica", 7.5) + c.stringWidth(text2, "Helvetica-Bold", 9),
-                 y_disc - 40, text3a)
-
-    # Second row
-    c.setFont("Helvetica", 7.5)
+    c.drawString(
+        disc_left + c.stringWidth(text1, "Helvetica", 7.5) + c.stringWidth(text2, "Helvetica-Bold", 9),
+        y_disc - 40, text3a
+    )
     c.drawString(disc_left, y_disc - 52, text3b)
 
-    # Follow-up disclaimers
     c.drawString(disc_left, y_disc - 66, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS")
     c.drawString(disc_left, y_disc - 78, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER")
-
 
     # QR code (in-memory, no temp files)
     try:
         qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{created_at[:10]}"
         qr_img  = qrcode.make(qr_data)
-        c.drawImage(ImageReader(qr_img), right - qr_size, y_disc - 50, qr_size, qr_size)
+        c.drawImage(ImageReader(qr_img), right - qr_size, y_disc - QR_TOP_OFFSET, qr_size, qr_size)
     except Exception:
         pass
 
@@ -396,84 +392,79 @@ class VoucherApp(ctk.CTk):
         self.geometry("1100x650")
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
-        self.minsize(800, 500)
+        self.minsize(900, 520)
 
-        # ----- Scrollable main container -----
-        outer = ctk.CTkFrame(self)
-        outer.pack(fill="both", expand=True)
-
-        # Canvas + scrollbars (h: manual, v: mouse wheel anywhere)
-        self.uicanvas = tk.Canvas(outer, highlightthickness=0)
-        self.uicanvas.pack(side="left", fill="both", expand=True)
-
-        vbar = ttk.Scrollbar(outer, orient="vertical", command=self.uicanvas.yview)
-        vbar.pack(side="right", fill="y")
-        hbar = ttk.Scrollbar(self, orient="horizontal", command=self.uicanvas.xview)
-        hbar.pack(side="bottom", fill="x")
-
-        self.uicanvas.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
-
-        self.scrollable_frame = ctk.CTkFrame(self.uicanvas)
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.uicanvas.configure(scrollregion=self.uicanvas.bbox("all"))
-        )
-        self.uicanvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-
-        # Global vertical scrolling (no need to hover the bar)
-        def _on_mousewheel(event):
-            # Windows/macOS: event.delta is +/- 120-ish; Linux uses Button-4/5 below
-            delta = int(-1 * (event.delta / 120)) if event.delta else 0
-            self.uicanvas.yview_scroll(delta, "units")
-        self.bind_all("<MouseWheel>", _on_mousewheel)            # Windows/macOS
-        self.bind_all("<Button-4>", lambda e: self.uicanvas.yview_scroll(-1, "units"))  # Linux up
-        self.bind_all("<Button-5>", lambda e: self.uicanvas.yview_scroll(1, "units"))   # Linux down
+        # ===== Layout: fully responsive grid, no canvas weirdness =====
+        self.grid_rowconfigure(1, weight=1)  # table grows
+        self.grid_columnconfigure(0, weight=1)
 
         # ---- Filters ----
-        filt = ctk.CTkFrame(self.scrollable_frame)
-        filt.pack(fill="x", padx=10, pady=(10, 4))
+        filt = ctk.CTkFrame(self)
+        filt.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+        for i in range(10):
+            filt.grid_columnconfigure(i, weight=0)
+        filt.grid_columnconfigure(9, weight=1)  # push buttons to the left, allow breathing room
+
         today = datetime.now().strftime("%Y-%m-%d")
+        self.f_voucher = ctk.CTkEntry(filt, width=130, placeholder_text="VoucherID");    self.f_voucher.grid(row=0, column=0, padx=5)
+        self.f_name    = ctk.CTkEntry(filt, width=220, placeholder_text="Customer Name"); self.f_name.grid(row=0, column=1, padx=5)
+        self.f_contact = ctk.CTkEntry(filt, width=180, placeholder_text="Contact Number"); self.f_contact.grid(row=0, column=2, padx=5)
+        self.f_from    = ctk.CTkEntry(filt, width=160, placeholder_text="Date From (YYYY-MM-DD)"); self.f_from.grid(row=0, column=3, padx=5)
+        self.f_to      = ctk.CTkEntry(filt, width=160, placeholder_text="Date To (YYYY-MM-DD)");   self.f_to.grid(row=0, column=4, padx=5)
+        self.f_from.insert(0, today); self.f_to.insert(0, today)
 
-        self.f_voucher = ctk.CTkEntry(filt, width=130, placeholder_text="VoucherID")
-        self.f_name    = ctk.CTkEntry(filt, width=220, placeholder_text="Customer Name")
-        self.f_contact = ctk.CTkEntry(filt, width=180, placeholder_text="Contact Number")
-        self.f_from    = ctk.CTkEntry(filt, width=160, placeholder_text="Date From (YYYY-MM-DD)")
-        self.f_to      = ctk.CTkEntry(filt, width=160, placeholder_text="Date To (YYYY-MM-DD)")
-        self.f_from.insert(0, today)
-        self.f_to.insert(0, today)
-
-        self.f_status  = ctk.CTkOptionMenu(filt, values=["All","Pending","Collected"], width=120)
+        self.f_status  = ctk.CTkOptionMenu(filt, values=["All","Pending","Collected"], width=120); self.f_status.grid(row=0, column=5, padx=(8,5))
         self.f_status.set("All")
-        self.btn_search = ctk.CTkButton(filt, text="Search", command=self.perform_search, width=100)
-        self.btn_reset  = ctk.CTkButton(filt, text="Reset",  command=self.reset_filters, width=80)
+        self.btn_search = ctk.CTkButton(filt, text="Search", command=self.perform_search, width=100); self.btn_search.grid(row=0, column=6, padx=5)
+        self.btn_reset  = ctk.CTkButton(filt, text="Reset",  command=self.reset_filters, width=80);   self.btn_reset.grid(row=0, column=7, padx=5)
 
-        for w in (self.f_voucher, self.f_name, self.f_contact, self.f_from, self.f_to, self.f_status,
-                  self.btn_search, self.btn_reset):
-            w.pack(side="left", padx=5, pady=8)
+        # ---- Table (with scrollbars) ----
+        table_frame = ctk.CTkFrame(self)
+        table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
 
-        # ---- Table ----
-        self.tree = ttk.Treeview(self.scrollable_frame,
+        self.tree = ttk.Treeview(
+            table_frame,
             columns=("VoucherID","Date","Customer","Contact","Units","Status","Remark","PDF"),
-            show="headings", height=18)
+            show="headings"
+        )
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        widths = {"VoucherID":120, "Date":160, "Customer":220, "Contact":160,
-                  "Units":70, "Status":100, "Remark":300, "PDF":0}
-        for col in self.tree["columns"]:
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        # column definitions + proportional autosize
+        self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Status":1, "Remark":3}
+        for col in self.col_weights.keys():
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=widths[col], anchor="w", stretch=(col != "PDF"))
+            self.tree.column(col, anchor="w", stretch=True, width=80)
+        # Hide PDF path column but keep data
+        self.tree.heading("PDF", text="PDF")
+        self.tree.column("PDF", width=0, anchor="w", stretch=False)
 
-        self.tree.pack(expand=True, fill="both", padx=10, pady=(4, 8))
+        def _autosize_columns(event=None):
+            total_weight = sum(self.col_weights.values())
+            usable = max(self.tree.winfo_width()-40, 300)
+            for col, wt in self.col_weights.items():
+                self.tree.column(col, width=int(usable * wt/total_weight))
+        table_frame.bind("<Configure>", _autosize_columns)
+
         self.tree.bind("<Double-1>", lambda e: self.open_pdf())
 
-
         # ---- Actions ----
-        bar = ctk.CTkFrame(self.scrollable_frame)
-        bar.pack(fill="x", padx=10, pady=(0,10))
-        ctk.CTkButton(bar, text="Add Voucher",       command=self.add_voucher_ui).pack(side="left", padx=8, pady=8)
-        ctk.CTkButton(bar, text="Edit Selected",     command=self.edit_selected).pack(side="left", padx=8, pady=8)
-        ctk.CTkButton(bar, text="Mark as Collected", command=self.mark_selected).pack(side="left", padx=8, pady=8)
-        ctk.CTkButton(bar, text="Open PDF",          command=self.open_pdf).pack(side="left", padx=8, pady=8)
-        ctk.CTkButton(bar, text="Manage Staffs",     command=self.manage_staffs_ui).pack(side="left", padx=8, pady=8)
+        bar = ctk.CTkFrame(self)
+        bar.grid(row=2, column=0, sticky="ew", padx=10, pady=(0,10))
+        for i in range(10): bar.grid_columnconfigure(i, weight=0)
+
+        ctk.CTkButton(bar, text="Add Voucher",       command=self.add_voucher_ui,    width=120).grid(row=0, column=0, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Edit Selected",     command=self.edit_selected,     width=120).grid(row=0, column=1, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Mark as Collected", command=self.mark_selected,     width=140).grid(row=0, column=2, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Open PDF",          command=self.open_pdf,          width=110).grid(row=0, column=3, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Manage Staffs",     command=self.manage_staffs_ui,  width=130).grid(row=0, column=4, padx=6, pady=8)
 
         self.perform_search()
 
