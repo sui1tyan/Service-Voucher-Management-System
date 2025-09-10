@@ -150,7 +150,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     - 'Recipient' line + acknowledgement sentence to the right
     - 'Remark' outside table
     - Signature + Date Collected on the same line
-    - Bottom disclaimers including highlighted RM45.00
+    - Bottom disclaimers including highlighted RM60.00
     """
 
     # Page frame
@@ -249,7 +249,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                  w=middle_col_w - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
     # ---- Recipient line + ack sentence ----
-    y_rec = bottom_table - 9.5*mm
+    y_rec = bottom_table - 10.5*mm
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left, y_rec, "RECIPIENT :")
     c.line(left + 24*mm, y_rec, left + 110*mm, y_rec)  # signature line
@@ -257,7 +257,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     draw_wrapped(
         c,
         "CUSTOMER ACKNOWLEDGE WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND REPAIRED SATISFACTORILY",
-        left + 118*mm, y_rec - 8,
+        left + 118*mm, y_rec - 14,
         right - (left + 118*mm), 18*mm, fontsize=8.9, leading=10
     )
 
@@ -287,24 +287,31 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.drawString(disc_left, y_disc - 12, "A) We do not hold ourselves responsible for any loss or damage.")
     c.drawString(disc_left, y_disc - 24, "B) We reserve our right to sell off the goods to cover our cost and loss.")
 
-    # Highlighted RM60.00 in red
+    # Highlighted RM60.00 in red (split into two rows, smaller font)
     text1 = "MINIMUM "
     text2 = "RM60.00"
-    text3 = " WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE."
-    base_y = y_disc - 40
-    c.setFont("Helvetica", 8.5)
-    c.drawString(disc_left, base_y, text1)
-    x_after1 = disc_left + c.stringWidth(text1, "Helvetica", 8.5)
-    c.setFillColorRGB(1, 0, 0)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x_after1, base_y, text2)
-    x_after2 = x_after1 + c.stringWidth(text2, "Helvetica-Bold", 10)
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica", 8.5)
-    c.drawString(x_after2, base_y, text3)
+    text3a = " WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE"
+    text3b = "ON ALL KIND OF HARDWARE AND SOFTWARE."
 
-    c.drawString(disc_left, y_disc - 54, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS")
-    c.drawString(disc_left, y_disc - 66, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER")
+    # First row
+    c.setFont("Helvetica", 7.5)
+    c.drawString(disc_left, y_disc - 40, text1)
+    c.setFillColorRGB(1, 0, 0)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(disc_left + c.stringWidth(text1, "Helvetica", 7.5), y_disc - 40, text2)
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica", 7.5)
+    c.drawString(disc_left + c.stringWidth(text1, "Helvetica", 7.5) + c.stringWidth(text2, "Helvetica-Bold", 9),
+                 y_disc - 40, text3a)
+
+    # Second row
+    c.setFont("Helvetica", 7.5)
+    c.drawString(disc_left, y_disc - 52, text3b)
+
+    # Follow-up disclaimers
+    c.drawString(disc_left, y_disc - 66, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS")
+    c.drawString(disc_left, y_disc - 78, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER")
+
 
     # QR code (in-memory, no temp files)
     try:
@@ -445,21 +452,19 @@ class VoucherApp(ctk.CTk):
             w.pack(side="left", padx=5, pady=8)
 
         # ---- Table ----
-        table_frame = ctk.CTkFrame(self.scrollable_frame)
-        table_frame.pack(fill="both", expand=True, padx=10, pady=(4, 8))
-
-        self.tree = ttk.Treeview(
-            table_frame,
+        self.tree = ttk.Treeview(self.scrollable_frame,
             columns=("VoucherID","Date","Customer","Contact","Units","Status","Remark","PDF"),
-            show="headings", height=18
-        )
+            show="headings", height=18)
+
         widths = {"VoucherID":120, "Date":160, "Customer":220, "Contact":160,
                   "Units":70, "Status":100, "Remark":300, "PDF":0}
         for col in self.tree["columns"]:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=widths[col], anchor="w", stretch=(col != "PDF"))
-        self.tree.pack(expand=True, fill="both")
+
+        self.tree.pack(expand=True, fill="both", padx=10, pady=(4, 8))
         self.tree.bind("<Double-1>", lambda e: self.open_pdf())
+
 
         # ---- Actions ----
         bar = ctk.CTkFrame(self.scrollable_frame)
