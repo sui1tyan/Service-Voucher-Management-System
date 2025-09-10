@@ -10,13 +10,13 @@ import webbrowser
 from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox, ttk
-
 import customtkinter as ctk
 import qrcode
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
+import io
 
 # ---------- Wrapped text helper (keeps text neatly inside cells) ----------
 from reportlab.platypus import Paragraph
@@ -80,6 +80,8 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.executescript(BASE_SCHEMA)
+    if not _column_exists(cur, "vouchers", "recipient"):
+        cur.execute("ALTER TABLE vouchers ADD COLUMN recipient TEXT")
     # Back-compat safety (ensure all columns exist)
     for tbl, wanted in {
         "vouchers": [
@@ -246,7 +248,6 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     y_rec = bottom_table - 10.5*mm
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left, y_rec, "RECIPIENT :")
-    c.line(left + 24*mm, y_rec, left + 110*mm, y_rec)  # signature line
 
     draw_wrapped(
         c,
@@ -293,15 +294,15 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     text3a = " WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE"
     text3b = "ON ALL KIND OF HARDWARE AND SOFTWARE."
 
-    c.setFont("Helvetica", 7.5)
+    c.setFont("Helvetica", 8.5)
     c.drawString(disc_left, y_disc - 40, text1)
     c.setFillColorRGB(1, 0, 0)
     c.setFont("Helvetica-Bold", 9)
-    c.drawString(disc_left + c.stringWidth(text1, "Helvetica", 7.5), y_disc - 40, text2)
+    c.drawString(disc_left + c.stringWidth(text1, "Helvetica", 8.5), y_disc - 40, text2)
     c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica", 7.5)
+    c.setFont("Helvetica", 8.5)
     c.drawString(
-        disc_left + c.stringWidth(text1, "Helvetica", 7.5) + c.stringWidth(text2, "Helvetica-Bold", 9),
+        disc_left + c.stringWidth(text1, "Helvetica", 8.5) + c.stringWidth(text2, "Helvetica-Bold", 9),
         y_disc - 40, text3a
     )
     c.drawString(disc_left, y_disc - 52, text3b)
@@ -330,7 +331,7 @@ def generate_pdf(voucher_id, customer_name, contact_number, units, remark,
     return filename
 
 # ------------------ DB ops ------------------
-def add_voucher(customer_name, contact_number, units, remark, particulars, problem, staff_name):
+def add_voucher(customer_name, contact_number, units, remark, particulars, problem, staff_name, recipient=""):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
@@ -345,10 +346,11 @@ def add_voucher(customer_name, contact_number, units, remark, particulars, probl
 
     cur.execute("""
         INSERT INTO vouchers (voucher_id, created_at, customer_name, contact_number, units,
-                              remark, particulars, problem, staff_name, status, pdf_path)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                              remark, particulars, problem, staff_name, status, recipient, pdf_path)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     """, (voucher_id, created_at, customer_name, contact_number, units,
-          remark, particulars, problem, staff_name, status, pdf_path))
+          remark, particulars, problem, staff_name, status, recipient, pdf_path))
+
     conn.commit()
     conn.close()
     return voucher_id, pdf_path
@@ -363,8 +365,9 @@ def mark_collected(voucher_id):
 def search_vouchers(filters):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, status, remark, pdf_path "
+    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, status, remark, recipient, pdf_path "
            "FROM vouchers WHERE 1=1")
+
     params = []
     if filters.get("voucher_id"):
         sql += " AND voucher_id LIKE ?"; params.append(f"%{filters['voucher_id']}%")
@@ -424,21 +427,21 @@ class VoucherApp(ctk.CTk):
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
-        self.tree = ttk.Treeview(
-            table_frame,
-            columns=("VoucherID","Date","Customer","Contact","Units","Status","Remark","PDF"),
-            show="headings"
-        )
-        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
+        self.tree = ttk.Treeview(table_frame,
+            columns=("VoucherID","Date","Customer","Contact","Units","Status","Remark","Recipient","PDF"),
+            show="headings")
         self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
+
+        # vertical + horizontal scrollbars just for table
+        table_vbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        table_hbar = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=table_vbar.set, xscrollcommand=table_hbar.set)
+
+        table_vbar.grid(row=0, column=1, sticky="ns")
+        table_hbar.grid(row=1, column=0, sticky="ew")
 
         # column definitions + proportional autosize
-        self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Status":1, "Remark":3}
+        self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Status":1, "Remark":3, "Recipient":2}
         for col in self.col_weights.keys():
             self.tree.heading(col, text=col)
             self.tree.column(col, anchor="w", stretch=True, width=80)
@@ -530,6 +533,10 @@ class VoucherApp(ctk.CTk):
             e_staff.set(staff_values[0])
         e_staff.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
 
+        ctk.CTkLabel(frm, text="Recipient", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
+        e_recipient = ctk.CTkEntry(frm, width=WIDE)
+        e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8))
+
         ctk.CTkLabel(frm, text="Remark", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
         t_remark = tk.Text(frm, width=66, height=4); t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8))
 
@@ -546,9 +553,12 @@ class VoucherApp(ctk.CTk):
             problem     = t_prob.get("1.0","end").strip()
             remark      = t_remark.get("1.0","end").strip()
             staff_name  = e_staff.get().strip()
+            recipient = e_recipient.get().strip()
+
+
             if not name or not contact:
                 messagebox.showerror("Missing", "Customer name and contact are required."); return
-            voucher_id, pdf_path = add_voucher(name, contact, units, remark, particulars, problem, staff_name)
+            voucher_id, pdf_path = add_voucher(name, contact, units, remark, particulars, problem, staff_name, recipient)
             messagebox.showinfo("Saved", f"Voucher {voucher_id} created.")
             try:
                 webbrowser.open_new(os.path.abspath(pdf_path))
@@ -658,14 +668,14 @@ class VoucherApp(ctk.CTk):
         cur = conn.cursor()
         cur.execute("""
             SELECT voucher_id, created_at, customer_name, contact_number, units,
-                   particulars, problem, remark, staff_name, status
+                   particulars, problem, remark, staff_name, status, recipient
             FROM vouchers WHERE voucher_id = ?
         """, (voucher_id,))
         row = cur.fetchone()
         conn.close()
         if not row: return
 
-        _, created_at, customer_name, contact_number, units, particulars, problem, remark, staff_name, status = row
+        _, created_at, customer_name, contact_number, units, particulars, problem, remark, staff_name, status, recipient = row
 
         # open edit window
         top = ctk.CTkToplevel(self)
@@ -709,6 +719,11 @@ class VoucherApp(ctk.CTk):
         e_staff.set(staff_name or "")
         e_staff.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
+        ctk.CTkLabel(frm, text="Recipient").grid(row=r, column=0, sticky="w")
+        e_recipient = ctk.CTkEntry(frm, width=WIDE)
+        e_recipient.insert(0, recipient or "")
+        e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+
         ctk.CTkLabel(frm, text="Remark").grid(row=r, column=0, sticky="w")
         t_remark = tk.Text(frm, width=66, height=4)
         t_remark.insert("1.0", remark or "")
@@ -725,16 +740,17 @@ class VoucherApp(ctk.CTk):
             problem_val     = t_prob.get("1.0","end").strip()
             remark_val      = t_remark.get("1.0","end").strip()
             staff_val       = e_staff.get().strip()
+            recipient_val = e_recipient.get().strip()
 
             # update DB
             conn = sqlite3.connect(DB_FILE)
             cur = conn.cursor()
             cur.execute("""UPDATE vouchers
                               SET customer_name=?, contact_number=?, units=?, particulars=?,
-                                  problem=?, remark=?, staff_name=?
+                                  problem=?, remark=?, staff_name=?, recipient=?
                             WHERE voucher_id=?""",
                         (name, contact, units_val, particulars_val,
-                         problem_val, remark_val, staff_val, voucher_id))
+                         problem_val, remark_val, staff_val, recipient_val, voucher_id))
             conn.commit()
 
             # regenerate PDF to reflect edits
