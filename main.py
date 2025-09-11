@@ -17,18 +17,13 @@ from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 
-# ---------- Wrapped text helpers (for safe, neat layout) ----------
+# ---------- Wrapped text helpers ----------
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 _styles = getSampleStyleSheet()
 _styleN = _styles["Normal"]
 
 def draw_wrapped(c, text, x, y, w, h, fontsize=10, bold=False, leading=None):
-    """
-    Draw text wrapped inside box (x, y, w, h).
-    NOTE: y is the *bottom* of the box; drawing happens top-down.
-    Returns the actual height used.
-    """
     style = _styleN.clone('wrap')
     style.fontName = "Helvetica-Bold" if bold else "Helvetica"
     style.fontSize = fontsize
@@ -39,16 +34,12 @@ def draw_wrapped(c, text, x, y, w, h, fontsize=10, bold=False, leading=None):
     return h_used
 
 def draw_wrapped_top(c, text, x, top_y, w, fontsize=10, bold=False, leading=None):
-    """
-    Draw a wrapped paragraph whose TOP is aligned at top_y.
-    Returns the actual height used.
-    """
     style = _styleN.clone('wrapTop')
     style.fontName = "Helvetica-Bold" if bold else "Helvetica"
     style.fontSize = fontsize
     style.leading = leading if leading else fontsize + 2
     para = Paragraph((text or "-").replace("\n", "<br/>"), style)
-    w_used, h_used = para.wrap(w, 1000*mm)  # very tall box; we only care about used height
+    w_used, h_used = para.wrap(w, 1000*mm)
     para.drawOn(c, x, top_y - h_used)
     return h_used
 
@@ -64,6 +55,29 @@ LOGO_PATH = ""  # optional: path to logo image (png/jpg). leave blank to skip
 
 BASE_VOUCHER_NO = 41000
 
+# ------------------ Date helpers (DD-MM-YYYY for UI/PDF) ------------------
+def _to_ui_date(dt: datetime) -> str:
+    return dt.strftime("%d-%m-%Y")
+
+def _to_ui_datetime_str(iso_str: str) -> str:
+    # iso_str like "YYYY-MM-DD HH:MM:SS"
+    try:
+        dt = datetime.strptime(iso_str, "%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%d-%m-%Y %H:%M:%S")
+    except Exception:
+        return iso_str
+
+def _from_ui_date_to_sqldate(s: str) -> str:
+    """UI date 'DD-MM-YYYY' -> 'YYYY-MM-DD' for SQL range filtering."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    try:
+        d = datetime.strptime(s, "%d-%m-%Y")
+        return d.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
 # ------------------ DB ------------------
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS vouchers (
@@ -77,6 +91,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
     problem TEXT,
     staff_name TEXT,
     status TEXT DEFAULT 'Pending',
+    recipient TEXT,
     pdf_path TEXT
 );
 CREATE TABLE IF NOT EXISTS staffs (
@@ -93,14 +108,12 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.executescript(BASE_SCHEMA)
-    if not _column_exists(cur, "vouchers", "recipient"):
-        cur.execute("ALTER TABLE vouchers ADD COLUMN recipient TEXT")
     for tbl, wanted in {
         "vouchers": [
             ("voucher_id","TEXT"), ("created_at","TEXT"), ("customer_name","TEXT"),
             ("contact_number","TEXT"), ("units","INTEGER"),
             ("particulars","TEXT"), ("problem","TEXT"), ("staff_name","TEXT"),
-            ("status","TEXT"), ("pdf_path","TEXT")
+            ("status","TEXT"), ("recipient","TEXT"), ("pdf_path","TEXT")
         ],
         "staffs": [("name","TEXT")]
     }.items():
@@ -156,20 +169,25 @@ def delete_staff(name: str):
 
 # ------------------ PDF ------------------
 def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
-                  units, particulars, problem, staff_name, created_at):
+                  units, particulars, problem, staff_name, created_at, recipient):
     """
-    A4 single voucher tuned so everything fits within HALF a page (top half).
+    A4 single voucher tuned to fit within half a page.
+    Layout changes:
+      - Left column (Customer/TEL) narrower
+      - QTY split: top cell only; bottom merged with PROBLEM
+      - Ack sentence removed
+      - Recipient has a name line 5mm below the label
     """
 
-    # Margins / page frame
+    # Margins / frame
     left   = 12*mm
     right  = width - 12*mm
     top_y  = height - 15*mm
     y      = top_y
 
-    # Column widths
+    # Column widths (narrower left)
     qty_col_w    = 20*mm
-    left_col_w   = 84*mm                     # LEFT half width (~middle of table)
+    left_col_w   = 74*mm     # narrower than before
     middle_col_w = (right - left) - left_col_w - qty_col_w
 
     name_col_x = left + left_col_w
@@ -181,36 +199,44 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     total_h = row1_h + row2_h
 
     # --- Header ---
-    text_x = left
-    c.setFont("Helvetica-Bold", 14); c.drawString(text_x, y, SHOP_NAME)
+    c.setFont("Helvetica-Bold", 14); c.drawString(left, y, SHOP_NAME)
     c.setFont("Helvetica", 9.2)
-    c.drawString(text_x, y - 5.0*mm, SHOP_ADDR)
-    c.drawString(text_x, y - 9.0*mm, SHOP_TEL)
+    c.drawString(left, y - 5.0*mm, SHOP_ADDR)
+    c.drawString(left, y - 9.0*mm, SHOP_TEL)
 
     c.setFont("Helvetica-Bold", 13)
     c.drawCentredString((left+right)/2, y - 16.0*mm, "SERVICE VOUCHER")
     c.drawRightString(right, y - 16.0*mm, f"No : {voucher_id}")
 
+    # Parse created_at -> DD-MM-YYYY and HH:MM:SS
+    try:
+        dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+        date_str = dt.strftime("%d-%m-%Y")
+        time_str = dt.strftime("%H:%M:%S")
+    except Exception:
+        date_str = created_at[:10]
+        time_str = created_at[11:19]
+
     c.setFont("Helvetica", 10)
     c.drawString(left, y - 24.0*mm, "Date :")
-    c.drawString(left + 18*mm, y - 24.0*mm, created_at[:10])
+    c.drawString(left + 18*mm, y - 24.0*mm, date_str)
     c.drawRightString(right - 27*mm, y - 24.0*mm, "Time In :")
-    c.drawRightString(right, y - 24.0*mm, created_at[11:19])
+    c.drawRightString(right, y - 24.0*mm, time_str)
 
     # --- Table frame ---
     top_table = y - 28*mm
     bottom_table = top_table - total_h
-
-    # outer border
-    c.rect(left, bottom_table, right-left, total_h, stroke=1, fill=0)
-    # verticals
-    c.line(name_col_x, top_table, name_col_x, bottom_table)
-    c.line(qty_col_x,  top_table, qty_col_x,  bottom_table)
-    # single horizontal split for left+middle only
     mid_y = top_table - row1_h
-    c.line(left, mid_y, qty_col_x, mid_y)
-
     pad = 3*mm
+
+    # Outer border
+    c.rect(left, bottom_table, right-left, total_h, stroke=1, fill=0)
+    # Vertical at middle (full)
+    c.line(name_col_x, top_table, name_col_x, bottom_table)
+    # Vertical for QTY ONLY on the TOP row (split)
+    c.line(qty_col_x, top_table, qty_col_x, mid_y)
+    # Horizontal split between rows (full width)
+    c.line(left, mid_y, right, mid_y)
 
     # Row 1 Left: CUSTOMER NAME
     c.setFont("Helvetica-Bold", 10.4)
@@ -226,11 +252,11 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                  name_col_x + pad, mid_y + pad,
                  w=middle_col_w - 2*pad, h=row1_h - 2*pad - 10, fontsize=10)
 
-    # QTY (spans both rows)
+    # Row 1 Right: QTY top cell
     c.setFont("Helvetica-Bold", 10.4)
     c.drawCentredString(qty_col_x + qty_col_w/2, top_table - pad - 8, "QTY")
     c.setFont("Helvetica", 11)
-    c.drawCentredString(qty_col_x + qty_col_w/2, bottom_table + total_h/2 - 3, str(units or 1))
+    c.drawCentredString(qty_col_x + qty_col_w/2, mid_y - (row1_h/2) + 3, str(units or 1))
 
     # Row 2 Left: TEL
     c.setFont("Helvetica-Bold", 10.4)
@@ -239,65 +265,77 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                  left + pad, bottom_table + pad,
                  w=left_col_w - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # Row 2 Middle: PROBLEM
+    # Row 2 Middle+Right merged: PROBLEM (spans middle_col_w + qty_col_w)
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(name_col_x + pad, mid_y - pad - 8, "PROBLEM")
     draw_wrapped(c, problem or "-",
                  name_col_x + pad, bottom_table + pad,
-                 w=middle_col_w - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
+                 w=(middle_col_w + qty_col_w) - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # ------- Baseline for RECIPIENT & Acknowledgement (safe gap under table) -------
-    y_rec = bottom_table - 9*mm   # ensures no overlap with the table
-
+    # ------- Recipient label + line (line 5mm below the label) -------
+    y_rec = bottom_table - 9*mm
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left, y_rec, "RECIPIENT :")
+    # draw a line where recipient name can be written
+    label_w = c.stringWidth("RECIPIENT :", "Helvetica-Bold", 10.4)
+    line_x0 = left + label_w + 6
+    line_x1 = left + left_col_w - 2*mm
+    line_y  = y_rec - 5*mm  # 5 units (mm) below the label baseline
+    c.line(line_x0, line_y, line_x1, line_y)
 
-    # Acknowledgement paragraph aligned to start on the same horizontal level as RECIPIENT
-    ack_x = name_col_x + 3*mm
-    ack_w = right - ack_x
-    draw_wrapped_top(
-        c,
-        "CUSTOMER ACKNOWLEDGE WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND REPAIRED SATISFACTORILY",
-        ack_x, y_rec + 1.2*mm,  # a tiny nudge so the first line visually matches the RECIPIENT baseline
-        w=ack_w, fontsize=9, leading=10
-    )
+    # If a recipient name exists, show it lightly above the line
+    if recipient:
+        c.setFont("Helvetica", 9)
+        c.drawString(line_x0 + 1*mm, line_y + 2.2*mm, recipient)
 
-    # ------- Company policies (restricted to LEFT HALF, pulled closer to recipient) -------
-    # Use a wrapped paragraph limited to left_col_w so it ends at the middle line.
-    policies_top = y_rec - 7*mm  # “move up a bit” (closer to RECIPIENT)
+    # ------- Company policies (left half only) -------
+    policies_top = y_rec - 7*mm
     policies_w   = left_col_w - 1.5*mm
 
-    policies_text = (
-        "Kindly collect your goods within 60 days from date of sending for repair.<br/>"
-        "A) We do not hold ourselves responsible for any loss or damage.<br/>"
-        "B) We reserve our right to sell off the goods to cover our cost and loss.<br/>"
-        "MINIMUM <font color='red'><b>RM60.00</b></font> WILL BE CHARGED ON TROUBLESHOOTING, "
-        "INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE.<br/>"
-        "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS<br/>"
-        "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER"
-    )
-    used_policies_h = draw_wrapped_top(
-        c, policies_text, left, policies_top, policies_w, fontsize=8, leading=10
-    )
-    policies_bottom = policies_top - used_policies_h
+    # 1) "60 days" (red, size 9) — base line 7.5
+    p1 = "Kindly collect your goods within <font color='red' size='9'>60 days</font> from date of sending for repair."
+    used_h = draw_wrapped_top(c, p1, left, policies_top, policies_w, fontsize=7.5, leading=10)
+    y_cursor = policies_top - used_h - 2
 
-    # Optional QR code, aligned with the policies block on the right side
+    # 2) A)
+    used_h = draw_wrapped_top(c, "A) We do not hold ourselves responsible for any loss or damage.",
+                              left, y_cursor, policies_w, fontsize=7.5, leading=10)
+    y_cursor -= used_h - 1
+
+    # 3) B)
+    used_h = draw_wrapped_top(c, "B) We reserve our right to sell off the goods to cover our cost and loss.",
+                              left, y_cursor, policies_w, fontsize=7.5, leading=10)
+    y_cursor -= used_h + 2
+
+    # 4) MINIMUM RM60.00... (rest from here = size 8, RM60.00 red size 9)
+    p4 = ("MINIMUM <font color='red' size='9'><b>RM60.00</b></font> WILL BE CHARGED ON TROUBLESHOOTING, "
+          "INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE.")
+    used_h = draw_wrapped_top(c, p4, left, y_cursor, policies_w, fontsize=8, leading=10)
+    y_cursor -= used_h - 1
+
+    # 5) PLEASE BRING...
+    used_h = draw_wrapped_top(c, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS",
+                              left, y_cursor, policies_w, fontsize=8, leading=10)
+    y_cursor -= used_h - 1
+
+    # 6) NO ATTENTION...
+    used_h = draw_wrapped_top(c, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER",
+                              left, y_cursor, policies_w, fontsize=8, leading=10)
+    policies_bottom = y_cursor - used_h
+
+    # QR code (aligned roughly with policies block)
     qr_size = 20*mm
     try:
-        qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{created_at[:10]}"
+        qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{date_str}"
         qr_img  = qrcode.make(qr_data)
-        # align roughly with the first third of the policies block
         qr_y = policies_top - (qr_size * 0.2)
         c.drawImage(ImageReader(qr_img), right - qr_size, qr_y - qr_size, qr_size, qr_size)
     except Exception:
         pass
 
-    # ------- Signatures (kept side-by-side, nudged downward a bit, never past half page) -------
-    # Target position just below policies with a small gap
+    # ------- Signatures (side-by-side, a bit lower, stay in top half) -------
     sig_gap_above = 6*mm
     candidate_y_sig = policies_bottom - sig_gap_above
-
-    # Keep everything within top half of A4 (ensure lowest content is not below half)
     half_limit = height/2 + 5*mm
     y_sig = max(candidate_y_sig, half_limit)
 
@@ -305,23 +343,21 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     SIG_GAP    = 6*mm
     sig_left_start = right - (2*SIG_LINE_W + SIG_GAP)
 
-    # Customer Signature (left of the pair)
     c.line(sig_left_start, y_sig, sig_left_start + SIG_LINE_W, y_sig)
     c.setFont("Helvetica", 8.8)
     c.drawString(sig_left_start, y_sig - 3.6*mm, "CUSTOMER SIGNATURE")
 
-    # Date Collected (right of the pair)
     right_line_x0 = sig_left_start + SIG_LINE_W + SIG_GAP
     c.line(right_line_x0, y_sig, right_line_x0 + SIG_LINE_W, y_sig)
     c.drawString(right_line_x0, y_sig - 3.6*mm, "DATE COLLECTED")
 
 def generate_pdf(voucher_id, customer_name, contact_number, units,
-                 particulars, problem, staff_name, status, created_at):
+                 particulars, problem, staff_name, status, created_at, recipient):
     filename = os.path.join(PDF_DIR, f"voucher_{voucher_id}.pdf")
     c = rl_canvas.Canvas(filename, pagesize=A4)
     width, height = A4
     _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
-                  units, particulars, problem, staff_name, created_at)
+                  units, particulars, problem, staff_name, created_at, recipient)
     c.showPage(); c.save()
     return filename
 
@@ -335,7 +371,7 @@ def add_voucher(customer_name, contact_number, units, particulars, problem, staf
 
     pdf_path = generate_pdf(
         voucher_id, customer_name, contact_number, units,
-        particulars, problem, staff_name, status, created_at
+        particulars, problem, staff_name, status, created_at, recipient
     )
 
     cur.execute("""
@@ -352,6 +388,65 @@ def mark_collected(voucher_id):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("UPDATE vouchers SET status='Collected' WHERE voucher_id = ?", (voucher_id,))
+    conn.commit()
+    conn.close()
+
+def delete_and_compact(voucher_id_str: str):
+    """
+    Delete voucher with ID = voucher_id_str and then renumber
+    all vouchers with ID > deleted so numbers remain contiguous.
+    PDFs are regenerated and file paths updated.
+    """
+    target = int(voucher_id_str)
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+
+    # 1) Delete the row and remove its PDF
+    cur.execute("SELECT pdf_path FROM vouchers WHERE voucher_id = ?", (voucher_id_str,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Voucher not found.")
+
+    old_pdf = row[0]
+    cur.execute("DELETE FROM vouchers WHERE voucher_id = ?", (voucher_id_str,))
+    if old_pdf and os.path.exists(old_pdf):
+        try: os.remove(old_pdf)
+        except Exception: pass
+
+    # 2) Fetch all vouchers with id > target, in ascending order
+    cur.execute("""
+        SELECT voucher_id, created_at, customer_name, contact_number, units,
+               particulars, problem, staff_name, status, recipient
+        FROM vouchers
+        WHERE CAST(voucher_id AS INTEGER) > ?
+        ORDER BY CAST(voucher_id AS INTEGER) ASC
+    """, (target,))
+    rows = cur.fetchall()
+
+    # 3) For each, decrement by 1 and regenerate PDF
+    for (vid, created_at, customer_name, contact_number, units,
+         particulars, problem, staff_name, status, recipient) in rows:
+        old_id = int(vid)
+        new_id = old_id - 1
+
+        # Remove old PDF file if exists
+        cur.execute("SELECT pdf_path FROM vouchers WHERE voucher_id=?", (vid,))
+        r = cur.fetchone()
+        if r and r[0] and os.path.exists(r[0]):
+            try: os.remove(r[0])
+            except Exception: pass
+
+        # Update voucher_id first
+        cur.execute("UPDATE vouchers SET voucher_id=? WHERE voucher_id=?", (str(new_id), vid))
+
+        # Regenerate PDF with new voucher number
+        new_pdf = generate_pdf(
+            str(new_id), customer_name, contact_number, units,
+            particulars, problem, staff_name, status, created_at, recipient
+        )
+        cur.execute("UPDATE vouchers SET pdf_path=? WHERE voucher_id=?", (new_pdf, str(new_id)))
+
     conn.commit()
     conn.close()
 
@@ -373,7 +468,7 @@ def search_vouchers(filters):
         sql += " AND created_at <= ?"; params.append(filters["date_to"].strip() + " 23:59:59")
     if filters.get("status") and filters["status"] != "All":
         sql += " AND status = ?"; params.append(filters["status"])
-    sql += " ORDER BY created_at DESC"
+    sql += " ORDER BY CAST(voucher_id AS INTEGER) DESC"
     cur.execute(sql, params)
     rows = cur.fetchall()
     conn.close()
@@ -400,13 +495,13 @@ class VoucherApp(ctk.CTk):
             filt.grid_columnconfigure(i, weight=0)
         filt.grid_columnconfigure(9, weight=1)
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today_ui = _to_ui_date(datetime.now())
         self.f_voucher = ctk.CTkEntry(filt, width=130, placeholder_text="VoucherID");    self.f_voucher.grid(row=0, column=0, padx=5)
         self.f_name    = ctk.CTkEntry(filt, width=220, placeholder_text="Customer Name"); self.f_name.grid(row=0, column=1, padx=5)
         self.f_contact = ctk.CTkEntry(filt, width=180, placeholder_text="Contact Number"); self.f_contact.grid(row=0, column=2, padx=5)
-        self.f_from    = ctk.CTkEntry(filt, width=160, placeholder_text="Date From (YYYY-MM-DD)"); self.f_from.grid(row=0, column=3, padx=5)
-        self.f_to      = ctk.CTkEntry(filt, width=160, placeholder_text="Date To (YYYY-MM-DD)");   self.f_to.grid(row=0, column=4, padx=5)
-        self.f_from.insert(0, today); self.f_to.insert(0, today)
+        self.f_from    = ctk.CTkEntry(filt, width=160, placeholder_text="Date From (DD-MM-YYYY)"); self.f_from.grid(row=0, column=3, padx=5)
+        self.f_to      = ctk.CTkEntry(filt, width=160, placeholder_text="Date To (DD-MM-YYYY)");   self.f_to.grid(row=0, column=4, padx=5)
+        self.f_from.insert(0, today_ui); self.f_to.insert(0, today_ui)
 
         self.f_status  = ctk.CTkOptionMenu(filt, values=["All","Pending","Collected"], width=120); self.f_status.grid(row=0, column=5, padx=(8,5))
         self.f_status.set("All")
@@ -456,6 +551,7 @@ class VoucherApp(ctk.CTk):
         ctk.CTkButton(bar, text="Mark as Collected", command=self.mark_selected,     width=140).grid(row=0, column=2, padx=6, pady=8)
         ctk.CTkButton(bar, text="Open PDF",          command=self.open_pdf,          width=110).grid(row=0, column=3, padx=6, pady=8)
         ctk.CTkButton(bar, text="Manage Staffs",     command=self.manage_staffs_ui,  width=130).grid(row=0, column=4, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Delete Selected",   command=self.delete_selected,   width=130, fg_color="#d9534f", hover_color="#c9302c").grid(row=0, column=5, padx=6, pady=8)
 
         self.perform_search()
 
@@ -465,25 +561,30 @@ class VoucherApp(ctk.CTk):
             "voucher_id": self.f_voucher.get().strip(),
             "name": self.f_name.get().strip(),
             "contact": self.f_contact.get().strip(),
-            "date_from": self.f_from.get().strip(),
-            "date_to": self.f_to.get().strip(),
+            # Convert UI DD-MM-YYYY -> SQL YYYY-MM-DD
+            "date_from": _from_ui_date_to_sqldate(self.f_from.get().strip()),
+            "date_to": _from_ui_date_to_sqldate(self.f_to.get().strip()),
             "status": self.f_status.get(),
         }
 
     def reset_filters(self):
         for e in (self.f_voucher, self.f_name, self.f_contact, self.f_from, self.f_to):
             e.delete(0, "end")
-        today = datetime.now().strftime("%Y-%m-%d")
-        self.f_from.insert(0, today)
-        self.f_to.insert(0, today)
+        today_ui = _to_ui_date(datetime.now())
+        self.f_from.insert(0, today_ui)
+        self.f_to.insert(0, today_ui)
         self.f_status.set("All")
         self.perform_search()
 
     def perform_search(self):
         rows = search_vouchers(self._get_filters())
         self.tree.delete(*self.tree.get_children())
-        for r in rows:
-            self.tree.insert("", "end", values=r)
+        for (vid, created_at, customer, contact, units, status, recipient, pdf) in rows:
+            self.tree.insert("", "end", values=(
+                vid,
+                _to_ui_datetime_str(created_at),  # DD-MM-YYYY HH:MM:SS
+                customer, contact, units, status, recipient, pdf
+            ))
 
     # ---- Create Voucher ----
     def add_voucher_ui(self):
@@ -620,6 +721,23 @@ class VoucherApp(ctk.CTk):
         messagebox.showinfo("Updated", f"Voucher {voucher_id} marked as Collected.")
         self.perform_search()
 
+    def delete_selected(self):
+        sel = self.tree.focus()
+        if not sel:
+            messagebox.showerror("Error", "Select a record first."); return
+        voucher_id = str(self.tree.item(sel)["values"][0])
+
+        if not messagebox.askyesno("Confirm Delete",
+                                   f"Delete voucher {voucher_id}?\n"
+                                   f"All later vouchers will shift up by 1 and PDFs will be regenerated."):
+            return
+        try:
+            delete_and_compact(voucher_id)
+            messagebox.showinfo("Deleted", f"Voucher {voucher_id} deleted and IDs compacted.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete: {e}")
+        self.perform_search()
+
     def open_pdf(self):
         sel = self.tree.focus()
         if not sel:
@@ -717,7 +835,7 @@ class VoucherApp(ctk.CTk):
             particulars_val = t_part.get("1.0","end").strip()
             problem_val     = t_prob.get("1.0","end").strip()
             staff_val       = e_staff.get().strip()
-            recipient_val = e_recipient.get().strip()
+            recipient_val   = e_recipient.get().strip()
 
             # update DB
             conn = sqlite3.connect(DB_FILE)
@@ -732,10 +850,10 @@ class VoucherApp(ctk.CTk):
 
             # regenerate PDF to reflect edits
             pdf_path = generate_pdf(
-                voucher_id, name, contact, units_val,
-                particulars_val, problem_val, staff_val, status, created_at
+                str(voucher_id), name, contact, units_val,
+                particulars_val, problem_val, staff_val, status, created_at, recipient_val
             )
-            cur.execute("UPDATE vouchers SET pdf_path=? WHERE voucher_id=?", (pdf_path, voucher_id))
+            cur.execute("UPDATE vouchers SET pdf_path=? WHERE voucher_id=?", (pdf_path, str(voucher_id)))
             conn.commit()
             conn.close()
 
