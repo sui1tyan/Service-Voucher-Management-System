@@ -60,7 +60,6 @@ def _to_ui_date(dt: datetime) -> str:
     return dt.strftime("%d-%m-%Y")
 
 def _to_ui_datetime_str(iso_str: str) -> str:
-    # iso_str like "YYYY-MM-DD HH:MM:SS"
     try:
         dt = datetime.strptime(iso_str, "%Y-%m-%d %H:%M:%S")
         return dt.strftime("%d-%m-%Y %H:%M:%S")
@@ -138,7 +137,7 @@ def next_voucher_id():
         return str(BASE_VOUCHER_NO)
     return str(int(row[0]) + 1)
 
-# ---- Staff ops ----
+# ---- Staff/Recipient ops ----
 def list_staffs():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -171,12 +170,11 @@ def delete_staff(name: str):
 def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                   units, particulars, problem, staff_name, created_at, recipient):
     """
-    A4 single voucher tuned to fit within half a page.
-    Layout changes:
-      - Left column (Customer/TEL) narrower
-      - QTY split: top cell only; bottom merged with PROBLEM
-      - Ack sentence removed
-      - Recipient has a name line 5mm below the label
+    A4 voucher fits in half a page.
+    - Narrower left column.
+    - QTY split: top-only; bottom merged with PROBLEM.
+    - Ack sentence removed.
+    - Recipient line 3mm below label (moved up by 2mm from before).
     """
 
     # Margins / frame
@@ -187,7 +185,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
 
     # Column widths (narrower left)
     qty_col_w    = 20*mm
-    left_col_w   = 74*mm     # narrower than before
+    left_col_w   = 74*mm
     middle_col_w = (right - left) - left_col_w - qty_col_w
 
     name_col_x = left + left_col_w
@@ -256,7 +254,8 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.setFont("Helvetica-Bold", 10.4)
     c.drawCentredString(qty_col_x + qty_col_w/2, top_table - pad - 8, "QTY")
     c.setFont("Helvetica", 11)
-    c.drawCentredString(qty_col_x + qty_col_w/2, mid_y - (row1_h/2) + 3, str(units or 1))
+    # Center of the TOP row = mid_y + row1_h/2
+    c.drawCentredString(qty_col_x + qty_col_w/2, mid_y + (row1_h/2) - 3, str(units or 1))
 
     # Row 2 Left: TEL
     c.setFont("Helvetica-Bold", 10.4)
@@ -272,18 +271,15 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                  name_col_x + pad, bottom_table + pad,
                  w=(middle_col_w + qty_col_w) - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # ------- Recipient label + line (line 5mm below the label) -------
+    # ------- Recipient label + line (line 3mm below the label) -------
     y_rec = bottom_table - 9*mm
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left, y_rec, "RECIPIENT :")
-    # draw a line where recipient name can be written
     label_w = c.stringWidth("RECIPIENT :", "Helvetica-Bold", 10.4)
     line_x0 = left + label_w + 6
     line_x1 = left + left_col_w - 2*mm
-    line_y  = y_rec - 5*mm  # 5 units (mm) below the label baseline
+    line_y  = y_rec - 3*mm  # moved UP by 2mm from previous 5mm
     c.line(line_x0, line_y, line_x1, line_y)
-
-    # If a recipient name exists, show it lightly above the line
     if recipient:
         c.setFont("Helvetica", 9)
         c.drawString(line_x0 + 1*mm, line_y + 2.2*mm, recipient)
@@ -292,33 +288,27 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     policies_top = y_rec - 7*mm
     policies_w   = left_col_w - 1.5*mm
 
-    # 1) "60 days" (red, size 9) — base line 7.5
     p1 = "Kindly collect your goods within <font color='red' size='9'>60 days</font> from date of sending for repair."
     used_h = draw_wrapped_top(c, p1, left, policies_top, policies_w, fontsize=7.5, leading=10)
     y_cursor = policies_top - used_h - 2
 
-    # 2) A)
     used_h = draw_wrapped_top(c, "A) We do not hold ourselves responsible for any loss or damage.",
                               left, y_cursor, policies_w, fontsize=7.5, leading=10)
     y_cursor -= used_h - 1
 
-    # 3) B)
     used_h = draw_wrapped_top(c, "B) We reserve our right to sell off the goods to cover our cost and loss.",
                               left, y_cursor, policies_w, fontsize=7.5, leading=10)
     y_cursor -= used_h + 2
 
-    # 4) MINIMUM RM60.00... (rest from here = size 8, RM60.00 red size 9)
     p4 = ("MINIMUM <font color='red' size='9'><b>RM60.00</b></font> WILL BE CHARGED ON TROUBLESHOOTING, "
           "INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE.")
     used_h = draw_wrapped_top(c, p4, left, y_cursor, policies_w, fontsize=8, leading=10)
     y_cursor -= used_h - 1
 
-    # 5) PLEASE BRING...
     used_h = draw_wrapped_top(c, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS",
                               left, y_cursor, policies_w, fontsize=8, leading=10)
     y_cursor -= used_h - 1
 
-    # 6) NO ATTENTION...
     used_h = draw_wrapped_top(c, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER",
                               left, y_cursor, policies_w, fontsize=8, leading=10)
     policies_bottom = y_cursor - used_h
@@ -508,14 +498,14 @@ class VoucherApp(ctk.CTk):
         self.btn_search = ctk.CTkButton(filt, text="Search", command=self.perform_search, width=100); self.btn_search.grid(row=0, column=6, padx=5)
         self.btn_reset  = ctk.CTkButton(filt, text="Reset",  command=self.reset_filters, width=80);   self.btn_reset.grid(row=0, column=7, padx=5)
 
-        # ---- Table ----
+        # ---- Table (Recipient before Status; Status last) ----
         table_frame = ctk.CTkFrame(self)
         table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
         self.tree = ttk.Treeview(table_frame,
-            columns=("VoucherID","Date","Customer","Contact","Units","Status", "Recipient","PDF"),
+            columns=("VoucherID","Date","Customer","Contact","Units","Recipient","Status","PDF"),
             show="headings")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
@@ -525,8 +515,8 @@ class VoucherApp(ctk.CTk):
         table_vbar.grid(row=0, column=1, sticky="ns")
         table_hbar.grid(row=1, column=0, sticky="ew")
 
-        self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Status":1, "Recipient":2}
-        for col in self.col_weights.keys():
+        self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Recipient":2, "Status":1}
+        for col in ("VoucherID","Date","Customer","Contact","Units","Recipient","Status"):
             self.tree.heading(col, text=col)
             self.tree.column(col, anchor="w", stretch=True, width=80)
         self.tree.heading("PDF", text="PDF")
@@ -550,7 +540,7 @@ class VoucherApp(ctk.CTk):
         ctk.CTkButton(bar, text="Edit Selected",     command=self.edit_selected,     width=120).grid(row=0, column=1, padx=6, pady=8)
         ctk.CTkButton(bar, text="Mark as Collected", command=self.mark_selected,     width=140).grid(row=0, column=2, padx=6, pady=8)
         ctk.CTkButton(bar, text="Open PDF",          command=self.open_pdf,          width=110).grid(row=0, column=3, padx=6, pady=8)
-        ctk.CTkButton(bar, text="Manage Staffs",     command=self.manage_staffs_ui,  width=130).grid(row=0, column=4, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Manage Recipients", command=self.manage_staffs_ui,  width=160).grid(row=0, column=4, padx=6, pady=8)
         ctk.CTkButton(bar, text="Delete Selected",   command=self.delete_selected,   width=130, fg_color="#d9534f", hover_color="#c9302c").grid(row=0, column=5, padx=6, pady=8)
 
         self.perform_search()
@@ -580,10 +570,12 @@ class VoucherApp(ctk.CTk):
         rows = search_vouchers(self._get_filters())
         self.tree.delete(*self.tree.get_children())
         for (vid, created_at, customer, contact, units, status, recipient, pdf) in rows:
+            # match new column order: ..., Recipient, Status
             self.tree.insert("", "end", values=(
                 vid,
-                _to_ui_datetime_str(created_at),  # DD-MM-YYYY HH:MM:SS
-                customer, contact, units, status, recipient, pdf
+                _to_ui_datetime_str(created_at),
+                customer, contact, units,
+                recipient, status, pdf
             ))
 
     # ---- Create Voucher ----
@@ -615,16 +607,13 @@ class VoucherApp(ctk.CTk):
         ctk.CTkLabel(frm, text="Problem", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
         t_prob = tk.Text(frm, width=66, height=4); t_prob.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
 
-        ctk.CTkLabel(frm, text="Staff Name", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
-        staff_values = list_staffs() or [""]
-        e_staff = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
-        if staff_values and staff_values[0] != "":
-            e_staff.set(staff_values[0])
-        e_staff.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
-
+        # Staff Name becomes Recipient (same combobox, same source list)
         ctk.CTkLabel(frm, text="Recipient", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
-        e_recipient = ctk.CTkEntry(frm, width=WIDE)
-        e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8))
+        staff_values = list_staffs() or [""]
+        e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
+        if staff_values and staff_values[0] != "":
+            e_recipient.set(staff_values[0])
+        e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
 
         btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=(0,12))
 
@@ -637,8 +626,8 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Invalid", "Units must be a number."); return
             particulars = t_part.get("1.0","end").strip()
             problem     = t_prob.get("1.0","end").strip()
-            staff_name  = e_staff.get().strip()
-            recipient = e_recipient.get().strip()
+            recipient   = e_recipient.get().strip()
+            staff_name  = recipient  # inherit properties: keep both columns synced
 
             if not name or not contact:
                 messagebox.showerror("Missing", "Customer name and contact are required."); return
@@ -653,10 +642,10 @@ class VoucherApp(ctk.CTk):
 
         ctk.CTkButton(btns, text="Save & Open PDF", command=save, width=180).pack(side="right")
 
-    # ---- Manage Staffs ----
+    # ---- Manage Recipients (formerly Staffs) ----
     def manage_staffs_ui(self):
         top = ctk.CTkToplevel(self)
-        top.title("Manage Staffs")
+        top.title("Manage Recipients")
         top.geometry("680x480")
         top.grab_set()
 
@@ -666,7 +655,7 @@ class VoucherApp(ctk.CTk):
         root.grid_columnconfigure(0, weight=1)
         root.grid_columnconfigure(1, weight=0)
 
-        entry = ctk.CTkEntry(root, placeholder_text="New staff name")
+        entry = ctk.CTkEntry(root, placeholder_text="New recipient name")
         entry.grid(row=0, column=0, sticky="ew", padx=(0,10), pady=(0,10))
 
         row1 = ctk.CTkFrame(root)
@@ -814,16 +803,12 @@ class VoucherApp(ctk.CTk):
         t_prob.insert("1.0", problem or "")
         t_prob.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
-        ctk.CTkLabel(frm, text="Staff").grid(row=r, column=0, sticky="w")
-        staff_values = list_staffs() or [""]
-        e_staff = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
-        e_staff.set(staff_name or "")
-        e_staff.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
-
+        # Recipient combobox (replaces Staff)
         ctk.CTkLabel(frm, text="Recipient").grid(row=r, column=0, sticky="w")
-        e_recipient = ctk.CTkEntry(frm, width=WIDE)
-        e_recipient.insert(0, recipient or "")
-        e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+        staff_values = list_staffs() or [""]
+        e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
+        e_recipient.set(recipient or staff_name or "")
+        e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
         def save_edit():
             name = e_name.get().strip()
@@ -834,8 +819,8 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Invalid", "Units must be a number."); return
             particulars_val = t_part.get("1.0","end").strip()
             problem_val     = t_prob.get("1.0","end").strip()
-            staff_val       = e_staff.get().strip()
             recipient_val   = e_recipient.get().strip()
+            staff_val       = recipient_val  # keep in sync
 
             # update DB
             conn = sqlite3.connect(DB_FILE)
@@ -865,6 +850,20 @@ class VoucherApp(ctk.CTk):
         ctk.CTkButton(btns, text="Save Changes", command=save_edit, width=160).pack(side="right", padx=6)
         ctk.CTkButton(btns, text="Cancel", command=top.destroy, width=100).pack(side="right", padx=6)
 
+    def open_pdf(self):
+        sel = self.tree.focus()
+        if not sel:
+            messagebox.showerror("Error", "Select a record first."); return
+        pdf_path = self.tree.item(sel)["values"][-1]
+        if not pdf_path or not os.path.exists(pdf_path):
+            messagebox.showerror("Error", "PDF not found for this voucher."); return
+        try:
+            webbrowser.open_new(os.path.abspath(pdf_path))
+        except Exception:
+            if os.name == "nt":
+                os.startfile(pdf_path)  # type: ignore
+            else:
+                os.system(f"open '{pdf_path}'" if sys.platform == "darwin" else f"xdg-open '{pdf_path}'")
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
