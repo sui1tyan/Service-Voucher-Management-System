@@ -67,7 +67,6 @@ def _to_ui_datetime_str(iso_str: str) -> str:
         return iso_str
 
 def _from_ui_date_to_sqldate(s: str) -> str:
-    """UI date 'DD-MM-YYYY' -> 'YYYY-MM-DD' for SQL range filtering."""
     s = (s or "").strip()
     if not s:
         return ""
@@ -170,11 +169,12 @@ def delete_staff(name: str):
 def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                   units, particulars, problem, staff_name, created_at, recipient):
     """
-    A4 voucher fits in half a page.
+    Half-page voucher.
     - Narrower left column.
-    - QTY split: top-only; bottom merged with PROBLEM.
-    - Ack sentence removed.
-    - Recipient line 3mm below label (moved up by 2mm from before).
+    - QTY value strictly in the upper QTY cell.
+    - Recipient line 3 mm below label.
+    - Company policies left half.
+    - New acknowledgement sentence on the right, under table, within right half.
     """
 
     # Margins / frame
@@ -188,7 +188,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     left_col_w   = 74*mm
     middle_col_w = (right - left) - left_col_w - qty_col_w
 
-    name_col_x = left + left_col_w
+    name_col_x = left + left_col_w        # vertical line between left & middle
     qty_col_x  = right - qty_col_w
 
     # Row heights
@@ -254,7 +254,6 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.setFont("Helvetica-Bold", 10.4)
     c.drawCentredString(qty_col_x + qty_col_w/2, top_table - pad - 8, "QTY")
     c.setFont("Helvetica", 11)
-    # Center of the TOP row = mid_y + row1_h/2
     c.drawCentredString(qty_col_x + qty_col_w/2, mid_y + (row1_h/2) - 3, str(units or 1))
 
     # Row 2 Left: TEL
@@ -264,12 +263,21 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                  left + pad, bottom_table + pad,
                  w=left_col_w - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # Row 2 Middle+Right merged: PROBLEM (spans middle_col_w + qty_col_w)
+    # Row 2 Middle+Right merged: PROBLEM
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(name_col_x + pad, mid_y - pad - 8, "PROBLEM")
     draw_wrapped(c, problem or "-",
                  name_col_x + pad, bottom_table + pad,
                  w=(middle_col_w + qty_col_w) - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
+
+    # ------- NEW: Acknowledgement sentence (right half, just under table) -------
+    ack_text = ("WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND "
+                "REPAIRED SATICFACTORILY")
+    ack_left   = name_col_x + 4*mm               # start just to the right of middle vertical line
+    ack_right  = right - 6*mm
+    ack_width  = max(20*mm, ack_right - ack_left)
+    ack_top_y  = bottom_table - 2*mm             # 2mm gap below table border to avoid overlap
+    draw_wrapped_top(c, ack_text, ack_left, ack_top_y, ack_width, fontsize=9, bold=True, leading=11)
 
     # ------- Recipient label + line (line 3mm below the label) -------
     y_rec = bottom_table - 9*mm
@@ -278,7 +286,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     label_w = c.stringWidth("RECIPIENT :", "Helvetica-Bold", 10.4)
     line_x0 = left + label_w + 6
     line_x1 = left + left_col_w - 2*mm
-    line_y  = y_rec - 3*mm  # moved UP by 2mm from previous 5mm
+    line_y  = y_rec - 3*mm  # moved up by 2 mm compared to earlier version
     c.line(line_x0, line_y, line_x1, line_y)
     if recipient:
         c.setFont("Helvetica", 9)
@@ -323,7 +331,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     except Exception:
         pass
 
-    # ------- Signatures (side-by-side, a bit lower, stay in top half) -------
+    # ------- Signatures (side-by-side, a bit lower) -------
     sig_gap_above = 6*mm
     candidate_y_sig = policies_bottom - sig_gap_above
     half_limit = height/2 + 5*mm
@@ -382,16 +390,10 @@ def mark_collected(voucher_id):
     conn.close()
 
 def delete_and_compact(voucher_id_str: str):
-    """
-    Delete voucher with ID = voucher_id_str and then renumber
-    all vouchers with ID > deleted so numbers remain contiguous.
-    PDFs are regenerated and file paths updated.
-    """
     target = int(voucher_id_str)
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
-    # 1) Delete the row and remove its PDF
     cur.execute("SELECT pdf_path FROM vouchers WHERE voucher_id = ?", (voucher_id_str,))
     row = cur.fetchone()
     if not row:
@@ -404,7 +406,6 @@ def delete_and_compact(voucher_id_str: str):
         try: os.remove(old_pdf)
         except Exception: pass
 
-    # 2) Fetch all vouchers with id > target, in ascending order
     cur.execute("""
         SELECT voucher_id, created_at, customer_name, contact_number, units,
                particulars, problem, staff_name, status, recipient
@@ -414,23 +415,16 @@ def delete_and_compact(voucher_id_str: str):
     """, (target,))
     rows = cur.fetchall()
 
-    # 3) For each, decrement by 1 and regenerate PDF
     for (vid, created_at, customer_name, contact_number, units,
          particulars, problem, staff_name, status, recipient) in rows:
         old_id = int(vid)
         new_id = old_id - 1
-
-        # Remove old PDF file if exists
         cur.execute("SELECT pdf_path FROM vouchers WHERE voucher_id=?", (vid,))
         r = cur.fetchone()
         if r and r[0] and os.path.exists(r[0]):
             try: os.remove(r[0])
             except Exception: pass
-
-        # Update voucher_id first
         cur.execute("UPDATE vouchers SET voucher_id=? WHERE voucher_id=?", (str(new_id), vid))
-
-        # Regenerate PDF with new voucher number
         new_pdf = generate_pdf(
             str(new_id), customer_name, contact_number, units,
             particulars, problem, staff_name, status, created_at, recipient
@@ -474,7 +468,6 @@ class VoucherApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
         self.minsize(900, 520)
 
-        # ===== Layout =====
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
@@ -551,7 +544,6 @@ class VoucherApp(ctk.CTk):
             "voucher_id": self.f_voucher.get().strip(),
             "name": self.f_name.get().strip(),
             "contact": self.f_contact.get().strip(),
-            # Convert UI DD-MM-YYYY -> SQL YYYY-MM-DD
             "date_from": _from_ui_date_to_sqldate(self.f_from.get().strip()),
             "date_to": _from_ui_date_to_sqldate(self.f_to.get().strip()),
             "status": self.f_status.get(),
@@ -570,7 +562,6 @@ class VoucherApp(ctk.CTk):
         rows = search_vouchers(self._get_filters())
         self.tree.delete(*self.tree.get_children())
         for (vid, created_at, customer, contact, units, status, recipient, pdf) in rows:
-            # match new column order: ..., Recipient, Status
             self.tree.insert("", "end", values=(
                 vid,
                 _to_ui_datetime_str(created_at),
@@ -607,7 +598,6 @@ class VoucherApp(ctk.CTk):
         ctk.CTkLabel(frm, text="Problem", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
         t_prob = tk.Text(frm, width=66, height=4); t_prob.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
 
-        # Staff Name becomes Recipient (same combobox, same source list)
         ctk.CTkLabel(frm, text="Recipient", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
         staff_values = list_staffs() or [""]
         e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
@@ -627,7 +617,7 @@ class VoucherApp(ctk.CTk):
             particulars = t_part.get("1.0","end").strip()
             problem     = t_prob.get("1.0","end").strip()
             recipient   = e_recipient.get().strip()
-            staff_name  = recipient  # inherit properties: keep both columns synced
+            staff_name  = recipient  # keep both columns in sync
 
             if not name or not contact:
                 messagebox.showerror("Missing", "Customer name and contact are required."); return
@@ -803,7 +793,7 @@ class VoucherApp(ctk.CTk):
         t_prob.insert("1.0", problem or "")
         t_prob.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
-        # Recipient combobox (replaces Staff)
+        # Recipient combobox
         ctk.CTkLabel(frm, text="Recipient").grid(row=r, column=0, sticky="w")
         staff_values = list_staffs() or [""]
         e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
@@ -822,7 +812,6 @@ class VoucherApp(ctk.CTk):
             recipient_val   = e_recipient.get().strip()
             staff_val       = recipient_val  # keep in sync
 
-            # update DB
             conn = sqlite3.connect(DB_FILE)
             cur = conn.cursor()
             cur.execute("""UPDATE vouchers
@@ -832,8 +821,6 @@ class VoucherApp(ctk.CTk):
                         (name, contact, units_val, particulars_val,
                          problem_val, staff_val, recipient_val, voucher_id))
             conn.commit()
-
-            # regenerate PDF to reflect edits
             pdf_path = generate_pdf(
                 str(voucher_id), name, contact, units_val,
                 particulars_val, problem_val, staff_val, status, created_at, recipient_val
@@ -849,21 +836,6 @@ class VoucherApp(ctk.CTk):
         btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=12)
         ctk.CTkButton(btns, text="Save Changes", command=save_edit, width=160).pack(side="right", padx=6)
         ctk.CTkButton(btns, text="Cancel", command=top.destroy, width=100).pack(side="right", padx=6)
-
-    def open_pdf(self):
-        sel = self.tree.focus()
-        if not sel:
-            messagebox.showerror("Error", "Select a record first."); return
-        pdf_path = self.tree.item(sel)["values"][-1]
-        if not pdf_path or not os.path.exists(pdf_path):
-            messagebox.showerror("Error", "PDF not found for this voucher."); return
-        try:
-            webbrowser.open_new(os.path.abspath(pdf_path))
-        except Exception:
-            if os.name == "nt":
-                os.startfile(pdf_path)  # type: ignore
-            else:
-                os.system(f"open '{pdf_path}'" if sys.platform == "darwin" else f"xdg-open '{pdf_path}'")
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
