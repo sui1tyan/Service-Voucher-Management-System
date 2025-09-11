@@ -16,9 +16,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
-import io
 
-# ---------- Wrapped text helper (keeps text neatly inside cells) ----------
+# ---------- Wrapped text helpers (for safe, neat layout) ----------
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 _styles = getSampleStyleSheet()
@@ -27,8 +26,8 @@ _styleN = _styles["Normal"]
 def draw_wrapped(c, text, x, y, w, h, fontsize=10, bold=False, leading=None):
     """
     Draw text wrapped inside box (x, y, w, h).
-    NOTE: y is the *bottom* of the box, but we draw from the TOP down
-    so labels/borders never collide with content.
+    NOTE: y is the *bottom* of the box; drawing happens top-down.
+    Returns the actual height used.
     """
     style = _styleN.clone('wrap')
     style.fontName = "Helvetica-Bold" if bold else "Helvetica"
@@ -37,6 +36,21 @@ def draw_wrapped(c, text, x, y, w, h, fontsize=10, bold=False, leading=None):
     para = Paragraph((text or "-").replace("\n", "<br/>"), style)
     w_used, h_used = para.wrap(w, h)
     para.drawOn(c, x, y + h - h_used)
+    return h_used
+
+def draw_wrapped_top(c, text, x, top_y, w, fontsize=10, bold=False, leading=None):
+    """
+    Draw a wrapped paragraph whose TOP is aligned at top_y.
+    Returns the actual height used.
+    """
+    style = _styleN.clone('wrapTop')
+    style.fontName = "Helvetica-Bold" if bold else "Helvetica"
+    style.fontSize = fontsize
+    style.leading = leading if leading else fontsize + 2
+    para = Paragraph((text or "-").replace("\n", "<br/>"), style)
+    w_used, h_used = para.wrap(w, 1000*mm)  # very tall box; we only care about used height
+    para.drawOn(c, x, top_y - h_used)
+    return h_used
 
 # ------------------ Config ------------------
 DB_FILE   = "vouchers.db"
@@ -81,7 +95,6 @@ def init_db():
     cur.executescript(BASE_SCHEMA)
     if not _column_exists(cur, "vouchers", "recipient"):
         cur.execute("ALTER TABLE vouchers ADD COLUMN recipient TEXT")
-    # Back-compat safety (ensure all columns exist)
     for tbl, wanted in {
         "vouchers": [
             ("voucher_id","TEXT"), ("created_at","TEXT"), ("customer_name","TEXT"),
@@ -145,18 +158,18 @@ def delete_staff(name: str):
 def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                   units, particulars, problem, staff_name, created_at):
     """
-    A4 single voucher matching your printed template (half-page friendly).
+    A4 single voucher tuned so everything fits within HALF a page (top half).
     """
 
-    # Page frame
+    # Margins / page frame
     left   = 12*mm
     right  = width - 12*mm
     top_y  = height - 15*mm
     y      = top_y
 
-    # Column widths (tuned for your print)
+    # Column widths
     qty_col_w    = 20*mm
-    left_col_w   = 84*mm
+    left_col_w   = 84*mm                     # LEFT half width (~middle of table)
     middle_col_w = (right - left) - left_col_w - qty_col_w
 
     name_col_x = left + left_col_w
@@ -168,16 +181,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     total_h = row1_h + row2_h
 
     # --- Header ---
-    if LOGO_PATH and os.path.exists(LOGO_PATH):
-        try:
-            c.drawImage(LOGO_PATH, left, y-12*mm, width=18*mm, height=18*mm,
-                        preserveAspectRatio=True, mask='auto')
-            text_x = left + 20*mm
-        except Exception:
-            text_x = left
-    else:
-        text_x = left
-
+    text_x = left
     c.setFont("Helvetica-Bold", 14); c.drawString(text_x, y, SHOP_NAME)
     c.setFont("Helvetica", 9.2)
     c.drawString(text_x, y - 5.0*mm, SHOP_ADDR)
@@ -242,24 +246,62 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                  name_col_x + pad, bottom_table + pad,
                  w=middle_col_w - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # ---- Recipient line + ack sentence ----
-    y_rec = bottom_table - 10.5*mm
+    # ------- Baseline for RECIPIENT & Acknowledgement (safe gap under table) -------
+    y_rec = bottom_table - 9*mm   # ensures no overlap with the table
+
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left, y_rec, "RECIPIENT :")
 
-    draw_wrapped(
+    # Acknowledgement paragraph aligned to start on the same horizontal level as RECIPIENT
+    ack_x = name_col_x + 3*mm
+    ack_w = right - ack_x
+    draw_wrapped_top(
         c,
         "CUSTOMER ACKNOWLEDGE WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND REPAIRED SATISFACTORILY",
-        left + 118*mm, y_rec - 14,
-        right - (left + 118*mm), 18*mm, fontsize=8.9, leading=10
+        ack_x, y_rec + 1.2*mm,  # a tiny nudge so the first line visually matches the RECIPIENT baseline
+        w=ack_w, fontsize=9, leading=10
     )
 
-    # ===== Signatures packed side-by-side on the RIGHT =====
-    # small gap after recipient
-    GAP_RECIPIENT_TO_SIG = 8*mm
-    y_sig = y_rec - GAP_RECIPIENT_TO_SIG
+    # ------- Company policies (restricted to LEFT HALF, pulled closer to recipient) -------
+    # Use a wrapped paragraph limited to left_col_w so it ends at the middle line.
+    policies_top = y_rec - 7*mm  # “move up a bit” (closer to RECIPIENT)
+    policies_w   = left_col_w - 1.5*mm
 
-    SIG_LINE_W = 45*mm         # shorter lines so both fit together
+    policies_text = (
+        "Kindly collect your goods within 60 days from date of sending for repair.<br/>"
+        "A) We do not hold ourselves responsible for any loss or damage.<br/>"
+        "B) We reserve our right to sell off the goods to cover our cost and loss.<br/>"
+        "MINIMUM <font color='red'><b>RM60.00</b></font> WILL BE CHARGED ON TROUBLESHOOTING, "
+        "INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE.<br/>"
+        "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS<br/>"
+        "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER"
+    )
+    used_policies_h = draw_wrapped_top(
+        c, policies_text, left, policies_top, policies_w, fontsize=8, leading=10
+    )
+    policies_bottom = policies_top - used_policies_h
+
+    # Optional QR code, aligned with the policies block on the right side
+    qr_size = 20*mm
+    try:
+        qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{created_at[:10]}"
+        qr_img  = qrcode.make(qr_data)
+        # align roughly with the first third of the policies block
+        qr_y = policies_top - (qr_size * 0.2)
+        c.drawImage(ImageReader(qr_img), right - qr_size, qr_y - qr_size, qr_size, qr_size)
+    except Exception:
+        pass
+
+    # ------- Signatures (kept side-by-side, nudged downward a bit, never past half page) -------
+    # Target position just below policies with a small gap
+    sig_gap_above = 6*mm
+    candidate_y_sig = policies_bottom - sig_gap_above
+
+    # Keep everything within top half of A4 (ensure lowest content is not below half)
+    half_limit = height/2 + 5*mm
+    y_sig = max(candidate_y_sig, half_limit)
+
+    SIG_LINE_W = 45*mm
     SIG_GAP    = 6*mm
     sig_left_start = right - (2*SIG_LINE_W + SIG_GAP)
 
@@ -272,45 +314,6 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     right_line_x0 = sig_left_start + SIG_LINE_W + SIG_GAP
     c.line(right_line_x0, y_sig, right_line_x0 + SIG_LINE_W, y_sig)
     c.drawString(right_line_x0, y_sig - 3.6*mm, "DATE COLLECTED")
-
-    # ===== Company policies moved UP (closer to recipient) =====
-    GAP_SIG_TO_DISC   = 4*mm    # tighter than before -> moves policies up
-    QR_TOP_OFFSET     = 44      # keep QR aligned relative to policies
-    qr_size = 20*mm
-
-    disc_left = left
-    y_disc = y_sig - GAP_SIG_TO_DISC
-
-    c.setFont("Helvetica", 8.5)
-    c.drawString(disc_left, y_disc, "Kindly collect your goods within 60 days from date of sending for repair.")
-    c.drawString(disc_left, y_disc - 12, "A) We do not hold ourselves responsible for any loss or damage.")
-    c.drawString(disc_left, y_disc - 24, "B) We reserve our right to sell off the goods to cover our cost and loss.")
-
-    text1  = "MINIMUM "
-    text2  = "RM60.00"
-    text3a = " WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE"
-    text3b = "ON ALL KIND OF HARDWARE AND SOFTWARE."
-
-    c.setFont("Helvetica", 8.5)
-    c.drawString(disc_left, y_disc - 40, text1)
-    c.setFillColorRGB(1, 0, 0); c.setFont("Helvetica-Bold", 9)
-    c.drawString(disc_left + c.stringWidth(text1, "Helvetica", 8.5), y_disc - 40, text2)
-    c.setFillColorRGB(0, 0, 0); c.setFont("Helvetica", 8.5)
-    c.drawString(
-        disc_left + c.stringWidth(text1, "Helvetica", 8.5) + c.stringWidth(text2, "Helvetica-Bold", 9),
-        y_disc - 40, text3a
-    )
-    c.drawString(disc_left, y_disc - 52, text3b)
-    c.drawString(disc_left, y_disc - 66, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS")
-    c.drawString(disc_left, y_disc - 78, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER")
-
-    # QR code (in-memory, no temp files)
-    try:
-        qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{created_at[:10]}"
-        qr_img  = qrcode.make(qr_data)
-        c.drawImage(ImageReader(qr_img), right - qr_size, y_disc - QR_TOP_OFFSET, qr_size, qr_size)
-    except Exception:
-        pass
 
 def generate_pdf(voucher_id, customer_name, contact_number, units,
                  particulars, problem, staff_name, status, created_at):
@@ -357,8 +360,6 @@ def search_vouchers(filters):
     cur = conn.cursor()
     sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, status, recipient, pdf_path "
            "FROM vouchers WHERE 1=1")
-
-
     params = []
     if filters.get("voucher_id"):
         sql += " AND voucher_id LIKE ?"; params.append(f"%{filters['voucher_id']}%")
@@ -388,8 +389,8 @@ class VoucherApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
         self.minsize(900, 520)
 
-        # ===== Layout: fully responsive grid, no canvas weirdness =====
-        self.grid_rowconfigure(1, weight=1)  # table grows
+        # ===== Layout =====
+        self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         # ---- Filters ----
@@ -397,7 +398,7 @@ class VoucherApp(ctk.CTk):
         filt.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
         for i in range(10):
             filt.grid_columnconfigure(i, weight=0)
-        filt.grid_columnconfigure(9, weight=1)  # push buttons to the left, allow breathing room
+        filt.grid_columnconfigure(9, weight=1)
 
         today = datetime.now().strftime("%Y-%m-%d")
         self.f_voucher = ctk.CTkEntry(filt, width=130, placeholder_text="VoucherID");    self.f_voucher.grid(row=0, column=0, padx=5)
@@ -412,7 +413,7 @@ class VoucherApp(ctk.CTk):
         self.btn_search = ctk.CTkButton(filt, text="Search", command=self.perform_search, width=100); self.btn_search.grid(row=0, column=6, padx=5)
         self.btn_reset  = ctk.CTkButton(filt, text="Reset",  command=self.reset_filters, width=80);   self.btn_reset.grid(row=0, column=7, padx=5)
 
-        # ---- Table (with scrollbars) ----
+        # ---- Table ----
         table_frame = ctk.CTkFrame(self)
         table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
         table_frame.grid_rowconfigure(0, weight=1)
@@ -423,20 +424,16 @@ class VoucherApp(ctk.CTk):
             show="headings")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
-        # vertical + horizontal scrollbars just for table
         table_vbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         table_hbar = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=table_vbar.set, xscrollcommand=table_hbar.set)
-
         table_vbar.grid(row=0, column=1, sticky="ns")
         table_hbar.grid(row=1, column=0, sticky="ew")
 
-        # column definitions + proportional autosize
         self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Status":1, "Recipient":2}
         for col in self.col_weights.keys():
             self.tree.heading(col, text=col)
             self.tree.column(col, anchor="w", stretch=True, width=80)
-        # Hide PDF path column but keep data
         self.tree.heading("PDF", text="PDF")
         self.tree.column("PDF", width=0, anchor="w", stretch=False)
 
@@ -542,7 +539,6 @@ class VoucherApp(ctk.CTk):
             staff_name  = e_staff.get().strip()
             recipient = e_recipient.get().strip()
 
-
             if not name or not contact:
                 messagebox.showerror("Missing", "Customer name and contact are required."); return
             voucher_id, pdf_path = add_voucher(name, contact, units, particulars, problem, staff_name, recipient)
@@ -556,7 +552,7 @@ class VoucherApp(ctk.CTk):
 
         ctk.CTkButton(btns, text="Save & Open PDF", command=save, width=180).pack(side="right")
 
-    # ---- Manage Staffs (tidy) ----
+    # ---- Manage Staffs ----
     def manage_staffs_ui(self):
         top = ctk.CTkToplevel(self)
         top.title("Manage Staffs")
