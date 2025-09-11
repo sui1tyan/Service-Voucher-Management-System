@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS vouchers (
     customer_name TEXT,
     contact_number TEXT,
     units INTEGER DEFAULT 1,
-    remark TEXT,
     particulars TEXT,
     problem TEXT,
     staff_name TEXT,
@@ -86,7 +85,7 @@ def init_db():
     for tbl, wanted in {
         "vouchers": [
             ("voucher_id","TEXT"), ("created_at","TEXT"), ("customer_name","TEXT"),
-            ("contact_number","TEXT"), ("units","INTEGER"), ("remark","TEXT"),
+            ("contact_number","TEXT"), ("units","INTEGER"),
             ("particulars","TEXT"), ("problem","TEXT"), ("staff_name","TEXT"),
             ("status","TEXT"), ("pdf_path","TEXT")
         ],
@@ -144,7 +143,7 @@ def delete_staff(name: str):
 
 # ------------------ PDF ------------------
 def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
-                  units, remark, particulars, problem, staff_name, created_at):
+                  units, particulars, problem, staff_name, created_at):
     """
     A4 single voucher matching your printed template (half-page friendly).
     """
@@ -179,8 +178,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     else:
         text_x = left
 
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(text_x, y, SHOP_NAME)
+    c.setFont("Helvetica-Bold", 14); c.drawString(text_x, y, SHOP_NAME)
     c.setFont("Helvetica", 9.2)
     c.drawString(text_x, y - 5.0*mm, SHOP_ADDR)
     c.drawString(text_x, y - 9.0*mm, SHOP_TEL)
@@ -256,30 +254,30 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
         right - (left + 118*mm), 18*mm, fontsize=8.9, leading=10
     )
 
-    # ---- Remark outside table ----
-    y_remark = y_rec - 11*mm
-    c.setFont("Helvetica-Bold", 10.4)
-    c.drawString(left, y_remark, "REMARK:")
-    draw_wrapped(c, remark or "-", left + 22*mm, y_remark - 10,
-                 w=(right - (left + 22*mm)), h=18*mm, fontsize=10)
+    # ===== Signatures packed side-by-side on the RIGHT =====
+    # small gap after recipient
+    GAP_RECIPIENT_TO_SIG = 8*mm
+    y_sig = y_rec - GAP_RECIPIENT_TO_SIG
 
-    # ===== Tighten bottom block spacing (move up) =====
-    # Tweak these 3 constants to nudge things if you want:
-    GAP_REMARK_TO_SIG = 12*mm   # was 20mm -> pulled up
-    GAP_SIG_TO_DISC   = 6*mm    # was 10mm -> pulled up
-    QR_TOP_OFFSET     = 44      # was 50 -> QR sits a bit higher
+    SIG_LINE_W = 45*mm         # shorter lines so both fit together
+    SIG_GAP    = 6*mm
+    sig_left_start = right - (2*SIG_LINE_W + SIG_GAP)
 
-    # ---- Signatures ----
-    y_sig = y_remark - GAP_REMARK_TO_SIG
-    c.line(left, y_sig, left + 60*mm, y_sig)
-    c.setFont("Helvetica", 9)
-    c.drawString(left, y_sig - 4*mm, "CUSTOMER SIGNATURE")
+    # Customer Signature (left of the pair)
+    c.line(sig_left_start, y_sig, sig_left_start + SIG_LINE_W, y_sig)
+    c.setFont("Helvetica", 8.8)
+    c.drawString(sig_left_start, y_sig - 3.6*mm, "CUSTOMER SIGNATURE")
 
-    c.line(right - 60*mm, y_sig, right, y_sig)
-    c.drawString(right - 60*mm, y_sig - 4*mm, "DATE COLLECTED")
+    # Date Collected (right of the pair)
+    right_line_x0 = sig_left_start + SIG_LINE_W + SIG_GAP
+    c.line(right_line_x0, y_sig, right_line_x0 + SIG_LINE_W, y_sig)
+    c.drawString(right_line_x0, y_sig - 3.6*mm, "DATE COLLECTED")
 
-    # ---- Disclaimers + QR (tighter, aligned with your screenshot) ----
+    # ===== Company policies moved UP (closer to recipient) =====
+    GAP_SIG_TO_DISC   = 4*mm    # tighter than before -> moves policies up
+    QR_TOP_OFFSET     = 44      # keep QR aligned relative to policies
     qr_size = 20*mm
+
     disc_left = left
     y_disc = y_sig - GAP_SIG_TO_DISC
 
@@ -288,7 +286,6 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.drawString(disc_left, y_disc - 12, "A) We do not hold ourselves responsible for any loss or damage.")
     c.drawString(disc_left, y_disc - 24, "B) We reserve our right to sell off the goods to cover our cost and loss.")
 
-    # RM60.00 line split into two rows, slightly smaller
     text1  = "MINIMUM "
     text2  = "RM60.00"
     text3a = " WILL BE CHARGED ON TROUBLESHOOTING, INSPECTION AND SERVICE"
@@ -296,17 +293,14 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
 
     c.setFont("Helvetica", 8.5)
     c.drawString(disc_left, y_disc - 40, text1)
-    c.setFillColorRGB(1, 0, 0)
-    c.setFont("Helvetica-Bold", 9)
+    c.setFillColorRGB(1, 0, 0); c.setFont("Helvetica-Bold", 9)
     c.drawString(disc_left + c.stringWidth(text1, "Helvetica", 8.5), y_disc - 40, text2)
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica", 8.5)
+    c.setFillColorRGB(0, 0, 0); c.setFont("Helvetica", 8.5)
     c.drawString(
         disc_left + c.stringWidth(text1, "Helvetica", 8.5) + c.stringWidth(text2, "Helvetica-Bold", 9),
         y_disc - 40, text3a
     )
     c.drawString(disc_left, y_disc - 52, text3b)
-
     c.drawString(disc_left, y_disc - 66, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS")
     c.drawString(disc_left, y_disc - 78, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER")
 
@@ -318,41 +312,37 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     except Exception:
         pass
 
-
-def generate_pdf(voucher_id, customer_name, contact_number, units, remark,
+def generate_pdf(voucher_id, customer_name, contact_number, units,
                  particulars, problem, staff_name, status, created_at):
     filename = os.path.join(PDF_DIR, f"voucher_{voucher_id}.pdf")
     c = rl_canvas.Canvas(filename, pagesize=A4)
     width, height = A4
     _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
-                  units, remark, particulars, problem, staff_name, created_at)
-    c.showPage()
-    c.save()
+                  units, particulars, problem, staff_name, created_at)
+    c.showPage(); c.save()
     return filename
 
 # ------------------ DB ops ------------------
-def add_voucher(customer_name, contact_number, units, remark, particulars, problem, staff_name, recipient=""):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
+def add_voucher(customer_name, contact_number, units, particulars, problem, staff_name, recipient=""):
+    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
 
     voucher_id = next_voucher_id()
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status = "Pending"
 
     pdf_path = generate_pdf(
-        voucher_id, customer_name, contact_number, units, remark,
+        voucher_id, customer_name, contact_number, units,
         particulars, problem, staff_name, status, created_at
     )
 
     cur.execute("""
         INSERT INTO vouchers (voucher_id, created_at, customer_name, contact_number, units,
-                              remark, particulars, problem, staff_name, status, recipient, pdf_path)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                              particulars, problem, staff_name, status, recipient, pdf_path)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, (voucher_id, created_at, customer_name, contact_number, units,
-          remark, particulars, problem, staff_name, status, recipient, pdf_path))
+          particulars, problem, staff_name, status, recipient, pdf_path))
 
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
     return voucher_id, pdf_path
 
 def mark_collected(voucher_id):
@@ -365,8 +355,9 @@ def mark_collected(voucher_id):
 def search_vouchers(filters):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, status, remark, recipient, pdf_path "
+    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, status, recipient, pdf_path "
            "FROM vouchers WHERE 1=1")
+
 
     params = []
     if filters.get("voucher_id"):
@@ -428,7 +419,7 @@ class VoucherApp(ctk.CTk):
         table_frame.grid_columnconfigure(0, weight=1)
 
         self.tree = ttk.Treeview(table_frame,
-            columns=("VoucherID","Date","Customer","Contact","Units","Status","Remark","Recipient","PDF"),
+            columns=("VoucherID","Date","Customer","Contact","Units","Status", "Recipient","PDF"),
             show="headings")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
@@ -441,7 +432,7 @@ class VoucherApp(ctk.CTk):
         table_hbar.grid(row=1, column=0, sticky="ew")
 
         # column definitions + proportional autosize
-        self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Status":1, "Remark":3, "Recipient":2}
+        self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Status":1, "Recipient":2}
         for col in self.col_weights.keys():
             self.tree.heading(col, text=col)
             self.tree.column(col, anchor="w", stretch=True, width=80)
@@ -537,9 +528,6 @@ class VoucherApp(ctk.CTk):
         e_recipient = ctk.CTkEntry(frm, width=WIDE)
         e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8))
 
-        ctk.CTkLabel(frm, text="Remark", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
-        t_remark = tk.Text(frm, width=66, height=4); t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8))
-
         btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=(0,12))
 
         def save():
@@ -551,14 +539,13 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Invalid", "Units must be a number."); return
             particulars = t_part.get("1.0","end").strip()
             problem     = t_prob.get("1.0","end").strip()
-            remark      = t_remark.get("1.0","end").strip()
             staff_name  = e_staff.get().strip()
             recipient = e_recipient.get().strip()
 
 
             if not name or not contact:
                 messagebox.showerror("Missing", "Customer name and contact are required."); return
-            voucher_id, pdf_path = add_voucher(name, contact, units, remark, particulars, problem, staff_name, recipient)
+            voucher_id, pdf_path = add_voucher(name, contact, units, particulars, problem, staff_name, recipient)
             messagebox.showinfo("Saved", f"Voucher {voucher_id} created.")
             try:
                 webbrowser.open_new(os.path.abspath(pdf_path))
@@ -668,14 +655,14 @@ class VoucherApp(ctk.CTk):
         cur = conn.cursor()
         cur.execute("""
             SELECT voucher_id, created_at, customer_name, contact_number, units,
-                   particulars, problem, remark, staff_name, status, recipient
+                   particulars, problem, staff_name, status, recipient
             FROM vouchers WHERE voucher_id = ?
         """, (voucher_id,))
         row = cur.fetchone()
         conn.close()
         if not row: return
 
-        _, created_at, customer_name, contact_number, units, particulars, problem, remark, staff_name, status, recipient = row
+        _, created_at, customer_name, contact_number, units, particulars, problem, staff_name, status, recipient = row
 
         # open edit window
         top = ctk.CTkToplevel(self)
@@ -724,11 +711,6 @@ class VoucherApp(ctk.CTk):
         e_recipient.insert(0, recipient or "")
         e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=6)
 
-        ctk.CTkLabel(frm, text="Remark").grid(row=r, column=0, sticky="w")
-        t_remark = tk.Text(frm, width=66, height=4)
-        t_remark.insert("1.0", remark or "")
-        t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=6)
-
         def save_edit():
             name = e_name.get().strip()
             contact = e_contact.get().strip()
@@ -738,7 +720,6 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Invalid", "Units must be a number."); return
             particulars_val = t_part.get("1.0","end").strip()
             problem_val     = t_prob.get("1.0","end").strip()
-            remark_val      = t_remark.get("1.0","end").strip()
             staff_val       = e_staff.get().strip()
             recipient_val = e_recipient.get().strip()
 
@@ -747,15 +728,15 @@ class VoucherApp(ctk.CTk):
             cur = conn.cursor()
             cur.execute("""UPDATE vouchers
                               SET customer_name=?, contact_number=?, units=?, particulars=?,
-                                  problem=?, remark=?, staff_name=?, recipient=?
+                                  problem=?, staff_name=?, recipient=?
                             WHERE voucher_id=?""",
                         (name, contact, units_val, particulars_val,
-                         problem_val, remark_val, staff_val, recipient_val, voucher_id))
+                         problem_val, staff_val, recipient_val, voucher_id))
             conn.commit()
 
             # regenerate PDF to reflect edits
             pdf_path = generate_pdf(
-                voucher_id, name, contact, units_val, remark_val,
+                voucher_id, name, contact, units_val,
                 particulars_val, problem_val, staff_val, status, created_at
             )
             cur.execute("UPDATE vouchers SET pdf_path=? WHERE voucher_id=?", (pdf_path, voucher_id))
