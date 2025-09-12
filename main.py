@@ -276,7 +276,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     ack_left   = name_col_x + 10*mm               # start just to the right of middle vertical line
     ack_right  = right - 6*mm
     ack_width  = max(20*mm, ack_right - ack_left)
-    ack_top_y  = bottom_table - 2*mm             # 2mm gap below table border to avoid overlap
+    ack_top_y  = bottom_table - 5*mm             # 2mm gap below table border to avoid overlap
     draw_wrapped_top(c, ack_text, ack_left, ack_top_y, ack_width, fontsize=9, bold=True, leading=11)
 
     # ------- Recipient label + line (line 3mm below the label) -------
