@@ -53,7 +53,7 @@ SHOP_ADDR = "TB4318, Lot 5, Block 31, Fajar Complex  91000 Tawau Sabah, Malaysia
 SHOP_TEL  = "Tel : 089-763778, H/P: 0168260533"
 LOGO_PATH = ""  # optional: path to logo image (png/jpg). leave blank to skip
 
-DEFAULT_BASE_VID = 41000  # used only for first-time initialization
+DEFAULT_BASE_VID = 41000  # used only at first run
 
 # ------------------ Date helpers (DD-MM-YYYY for UI/PDF) ------------------
 def _to_ui_date(dt: datetime) -> str:
@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
     staff_name TEXT,
     status TEXT DEFAULT 'Pending',
     recipient TEXT,
+    remark TEXT,
     pdf_path TEXT
 );
 CREATE TABLE IF NOT EXISTS staffs (
@@ -123,28 +124,22 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.executescript(BASE_SCHEMA)
-    # ensure all columns exist (defensive)
-    for tbl, wanted in {
-        "vouchers": [
-            ("voucher_id","TEXT"), ("created_at","TEXT"), ("customer_name","TEXT"),
-            ("contact_number","TEXT"), ("units","INTEGER"),
-            ("particulars","TEXT"), ("problem","TEXT"), ("staff_name","TEXT"),
-            ("status","TEXT"), ("recipient","TEXT"), ("pdf_path","TEXT")
-        ],
-        "staffs": [("name","TEXT")]
-    }.items():
-        for col, typ in wanted:
-            if not _column_exists(cur, tbl, col):
-                cur.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
+    # defensive: add any missing columns
+    for col, typ in [
+        ("voucher_id","TEXT"), ("created_at","TEXT"), ("customer_name","TEXT"),
+        ("contact_number","TEXT"), ("units","INTEGER"), ("particulars","TEXT"),
+        ("problem","TEXT"), ("staff_name","TEXT"), ("status","TEXT"),
+        ("recipient","TEXT"), ("remark","TEXT"), ("pdf_path","TEXT")
+    ]:
+        if not _column_exists(cur, "vouchers", col):
+            cur.execute(f"ALTER TABLE vouchers ADD COLUMN {col} {typ}")
     try:
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_vid ON vouchers(voucher_id)")
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_staffs_name ON staffs(name)")
     except Exception:
         pass
-    # default base vid if not set
     _get_setting(cur, "base_vid", DEFAULT_BASE_VID)
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
 def _read_base_vid():
     conn = sqlite3.connect(DB_FILE)
@@ -155,13 +150,11 @@ def _read_base_vid():
     return int(row[0]) if row and row[0] else DEFAULT_BASE_VID
 
 def next_voucher_id():
-    """Return the next running voucher id (max + 1). If DB empty, use base_vid."""
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT MAX(CAST(voucher_id AS INTEGER)) FROM vouchers")
     row = cur.fetchone()
     if not row or row[0] is None:
-        # use base_vid setting
         base = _get_setting(cur, "base_vid", DEFAULT_BASE_VID)
         conn.commit(); conn.close()
         return str(base)
@@ -201,22 +194,12 @@ def delete_staff(name: str):
 # ------------------ PDF ------------------
 def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                   units, particulars, problem, staff_name, created_at, recipient):
-    """
-    Half-page voucher layout with:
-    - Narrower left column
-    - QTY value strictly in upper QTY cell
-    - Recipient line 3 mm below label
-    - Company policies (left half)
-    - Acknowledgement sentence on right half under the table
-    """
-
     # Margins / frame
     left   = 12*mm
     right  = width - 12*mm
     top_y  = height - 15*mm
     y      = top_y
 
-    # Column widths (narrower left)
     qty_col_w    = 20*mm
     left_col_w   = 74*mm
     middle_col_w = (right - left) - left_col_w - qty_col_w
@@ -224,10 +207,8 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     name_col_x = left + left_col_w
     qty_col_x  = right - qty_col_w
 
-    # Row heights
     row1_h = 20*mm
     row2_h = 20*mm
-    total_h = row1_h + row2_h
 
     # --- Header ---
     c.setFont("Helvetica-Bold", 14); c.drawString(left, y, SHOP_NAME)
@@ -239,14 +220,13 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.drawCentredString((left+right)/2, y - 16.0*mm, "SERVICE VOUCHER")
     c.drawRightString(right, y - 16.0*mm, f"No : {voucher_id}")
 
-    # Parse created_at -> DD-MM-YYYY and HH:MM:SS
+    # date/time
     try:
         dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
         date_str = dt.strftime("%d-%m-%Y")
         time_str = dt.strftime("%H:%M:%S")
     except Exception:
-        date_str = created_at[:10]
-        time_str = created_at[11:19]
+        date_str = created_at[:10]; time_str = created_at[11:19]
 
     c.setFont("Helvetica", 10)
     c.drawString(left, y - 24.0*mm, "Date :")
@@ -256,34 +236,28 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
 
     # --- Table frame ---
     top_table = y - 28*mm
-    bottom_table = top_table - total_h
+    bottom_table = top_table - (row1_h + row2_h)
     mid_y = top_table - row1_h
     pad = 3*mm
 
-    # Outer border
-    c.rect(left, bottom_table, right-left, total_h, stroke=1, fill=0)
-    # Vertical at middle (full)
+    c.rect(left, bottom_table, right-left, (row1_h + row2_h), stroke=1, fill=0)
     c.line(name_col_x, top_table, name_col_x, bottom_table)
-    # Vertical for QTY ONLY on the TOP row
     c.line(qty_col_x, top_table, qty_col_x, mid_y)
-    # Horizontal split between rows (full width)
     c.line(left, mid_y, right, mid_y)
 
     # Row 1 Left: CUSTOMER NAME
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left + pad, top_table - pad - 8, "CUSTOMER NAME")
-    draw_wrapped(c, customer_name,
-                 left + pad, mid_y + pad,
+    draw_wrapped(c, customer_name, left + pad, mid_y + pad,
                  w=left_col_w - 2*pad, h=row1_h - 2*pad - 10, fontsize=10)
 
     # Row 1 Middle: PARTICULARS
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(name_col_x + pad, top_table - pad - 8, "PARTICULARS")
-    draw_wrapped(c, particulars or "-",
-                 name_col_x + pad, mid_y + pad,
+    draw_wrapped(c, particulars or "-", name_col_x + pad, mid_y + pad,
                  w=middle_col_w - 2*pad, h=row1_h - 2*pad - 10, fontsize=10)
 
-    # Row 1 Right: QTY top cell
+    # Row 1 Right: QTY (value in upper cell)
     c.setFont("Helvetica-Bold", 10.4)
     c.drawCentredString(qty_col_x + qty_col_w/2, top_table - pad - 8, "QTY")
     c.setFont("Helvetica", 11)
@@ -292,18 +266,16 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     # Row 2 Left: TEL
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left + pad, mid_y - pad - 8, "TEL")
-    draw_wrapped(c, contact_number,
-                 left + pad, bottom_table + pad,
+    draw_wrapped(c, contact_number, left + pad, bottom_table + pad,
                  w=left_col_w - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # Row 2 Middle+Right merged: PROBLEM
+    # Row 2 Middle+Right: PROBLEM
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(name_col_x + pad, mid_y - pad - 8, "PROBLEM")
-    draw_wrapped(c, problem or "-",
-                 name_col_x + pad, bottom_table + pad,
+    draw_wrapped(c, problem or "-", name_col_x + pad, bottom_table + pad,
                  w=(middle_col_w + qty_col_w) - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
-    # ------- Acknowledgement sentence (right half) -------
+    # Acknowledgement sentence (right half)
     ack_text = ("WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND "
                 "REPAIRED SATISFACTORILY")
     ack_left   = name_col_x + 10*mm
@@ -312,7 +284,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     ack_top_y  = bottom_table - 5*mm
     draw_wrapped_top(c, ack_text, ack_left, ack_top_y, ack_width, fontsize=9, bold=True, leading=11)
 
-    # ------- Recipient label + line -------
+    # Recipient + line
     y_rec = bottom_table - 9*mm
     c.setFont("Helvetica-Bold", 10.4)
     c.drawString(left, y_rec, "RECIPIENT :")
@@ -325,36 +297,31 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
         c.setFont("Helvetica", 9)
         c.drawString(line_x0 + 1*mm, line_y + 2.2*mm, recipient)
 
-    # ------- Company policies -------
+    # Policies (left half)
     policies_top = y_rec - 7*mm
     policies_w   = left_col_w - 1.5*mm
 
     p1 = "Kindly collect your goods within <font color='red' size='9'>60 days</font> from date of sending for repair."
     used_h = draw_wrapped_top(c, p1, left, policies_top, policies_w, fontsize=6.5, leading=10)
     y_cursor = policies_top - used_h - 2
-
     used_h = draw_wrapped_top(c, "A) We do not hold ourselves responsible for any loss or damage.",
                               left, y_cursor, policies_w, fontsize=6.5, leading=10)
     y_cursor -= used_h - 1
-
     used_h = draw_wrapped_top(c, "B) We reserve our right to sell off the goods to cover our cost and loss.",
                               left, y_cursor, policies_w, fontsize=6.5, leading=10)
     y_cursor -= used_h + 2
-
     p4 = ("MINIMUM <font color='red' size='9'><b>RM60.00</b></font> WILL BE CHARGED ON TROUBLESHOOTING, "
           "INSPECTION AND SERVICE ON ALL KIND OF HARDWARE AND SOFTWARE.")
     used_h = draw_wrapped_top(c, p4, left, y_cursor, policies_w, fontsize=8, leading=10)
     y_cursor -= used_h - 1
-
     used_h = draw_wrapped_top(c, "PLEASE BRING ALONG THIS SERVICE VOUCHER TO COLLECT YOUR GOODS",
                               left, y_cursor, policies_w, fontsize=8, leading=10)
     y_cursor -= used_h - 1
-
     used_h = draw_wrapped_top(c, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER",
                               left, y_cursor, policies_w, fontsize=8, leading=10)
     policies_bottom = y_cursor - used_h
 
-    # QR code
+    # QR
     qr_size = 20*mm
     try:
         qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{date_str}"
@@ -364,7 +331,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     except Exception:
         pass
 
-    # ------- Signatures (side-by-side, aligned slightly above policies bottom) -------
+    # Signatures
     sig_gap_above = 2*mm
     candidate_y_sig = policies_bottom + sig_gap_above
     half_limit = height/2 - 20*mm
@@ -393,7 +360,7 @@ def generate_pdf(voucher_id, customer_name, contact_number, units,
     return filename
 
 # ------------------ DB ops ------------------
-def add_voucher(customer_name, contact_number, units, particulars, problem, staff_name, recipient=""):
+def add_voucher(customer_name, contact_number, units, particulars, problem, staff_name, recipient="", remark=""):
     conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
 
     voucher_id = next_voucher_id()
@@ -407,10 +374,10 @@ def add_voucher(customer_name, contact_number, units, particulars, problem, staf
 
     cur.execute("""
         INSERT INTO vouchers (voucher_id, created_at, customer_name, contact_number, units,
-                              particulars, problem, staff_name, status, recipient, pdf_path)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                              particulars, problem, staff_name, status, recipient, remark, pdf_path)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     """, (voucher_id, created_at, customer_name, contact_number, units,
-          particulars, problem, staff_name, status, recipient, pdf_path))
+          particulars, problem, staff_name, status, recipient, remark, pdf_path))
 
     conn.commit(); conn.close()
     return voucher_id, pdf_path
@@ -423,7 +390,6 @@ def mark_completed(voucher_id):
     conn.close()
 
 def mark_deleted(voucher_id):
-    """Soft delete: mark as Deleted. Do NOT renumber anything."""
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("UPDATE vouchers SET status='Deleted' WHERE voucher_id = ?", (voucher_id,))
@@ -433,7 +399,7 @@ def mark_deleted(voucher_id):
 def search_vouchers(filters):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, status, recipient, pdf_path "
+    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, remark, status, recipient, pdf_path "
            "FROM vouchers WHERE 1=1")
     params = []
     if filters.get("voucher_id"):
@@ -455,24 +421,14 @@ def search_vouchers(filters):
     return rows
 
 def modify_base_vid(new_base: int):
-    """
-    Modify the starting voucher ID.
-    - If DB empty: just update settings.base_vid.
-    - If vouchers exist: compute delta = new_base - current_min and renumber ALL vouchers
-      by delta, regenerating PDFs. We update DESC for delta>0, ASC for delta<0 to avoid collisions.
-    """
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-
-    # read current min
     cur.execute("SELECT MIN(CAST(voucher_id AS INTEGER)) FROM vouchers")
     row = cur.fetchone()
     if not row or row[0] is None:
-        # no vouchers yet -> only adjust base setting
         _set_setting(cur, "base_vid", new_base)
         conn.commit(); conn.close()
         return 0
-
     current_min = int(row[0])
     delta = int(new_base) - current_min
     if delta == 0:
@@ -483,35 +439,27 @@ def modify_base_vid(new_base: int):
     order = "DESC" if delta > 0 else "ASC"
     cur.execute(f"""
         SELECT voucher_id, created_at, customer_name, contact_number, units,
-               particulars, problem, staff_name, status, recipient, pdf_path
+               particulars, problem, staff_name, status, recipient, remark, pdf_path
         FROM vouchers
         ORDER BY CAST(voucher_id AS INTEGER) {order}
     """)
     rows = cur.fetchall()
 
     for (vid, created_at, customer_name, contact_number, units,
-         particulars, problem, staff_name, status, recipient, old_pdf) in rows:
+         particulars, problem, staff_name, status, recipient, remark, old_pdf) in rows:
         old_id = int(vid)
         new_id = old_id + delta
-
-        # remove old PDF (optional; prevents orphaned files)
         try:
-            if old_pdf and os.path.exists(old_pdf):
-                os.remove(old_pdf)
+            if old_pdf and os.path.exists(old_pdf): os.remove(old_pdf)
         except Exception:
             pass
-
-        # update ID first (unique index safe due to order)
         cur.execute("UPDATE vouchers SET voucher_id=? WHERE voucher_id=?", (str(new_id), str(old_id)))
-
-        # regenerate PDF with new number
         new_pdf = generate_pdf(
             str(new_id), customer_name, contact_number, int(units or 1),
             particulars, problem, staff_name, status, created_at, recipient
         )
         cur.execute("UPDATE vouchers SET pdf_path=? WHERE voucher_id=?", (new_pdf, str(new_id)))
 
-    # finally set base setting to new base
     _set_setting(cur, "base_vid", new_base)
     conn.commit(); conn.close()
     return delta
@@ -521,10 +469,10 @@ class VoucherApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Service Voucher Management System")
-        self.geometry("1200x680")
+        self.geometry("1200x700")
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
-        self.minsize(980, 540)
+        self.minsize(980, 560)
 
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -549,27 +497,28 @@ class VoucherApp(ctk.CTk):
         self.btn_search = ctk.CTkButton(filt, text="Search", command=self.perform_search, width=100); self.btn_search.grid(row=0, column=6, padx=5)
         self.btn_reset  = ctk.CTkButton(filt, text="Reset",  command=self.reset_filters, width=80);   self.btn_reset.grid(row=0, column=7, padx=5)
 
-        # ---- Table (Recipient before Status; Status last) ----
+        # ---- Table (Remark added; Recipient before Status) ----
         table_frame = ctk.CTkFrame(self)
         table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
         self.tree = ttk.Treeview(table_frame,
-            columns=("VoucherID","Date","Customer","Contact","Units","Recipient","Status","PDF"),
+            columns=("VoucherID","Date","Customer","Contact","Units","Remark","Recipient","Status","PDF"),
             show="headings")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
-        # Scrollbars
         table_vbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         table_hbar = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=table_vbar.set, xscrollcommand=table_hbar.set)
         table_vbar.grid(row=0, column=1, sticky="ns")
         table_hbar.grid(row=1, column=0, sticky="ew")
 
-        # Column setup
-        self.col_weights = {"VoucherID":1, "Date":2, "Customer":2, "Contact":2, "Units":1, "Recipient":2, "Status":1}
-        for col in ("VoucherID","Date","Customer","Contact","Units","Recipient","Status"):
+        self.col_weights = {
+            "VoucherID":1, "Date":2, "Customer":2, "Contact":2,
+            "Units":1, "Remark":2, "Recipient":2, "Status":1
+        }
+        for col in ("VoucherID","Date","Customer","Contact","Units","Remark","Recipient","Status"):
             self.tree.heading(col, text=col)
             self.tree.column(col, anchor="w", stretch=True, width=80)
         self.tree.heading("PDF", text="PDF")
@@ -583,9 +532,9 @@ class VoucherApp(ctk.CTk):
         table_frame.bind("<Configure>", _autosize_columns)
 
         # Row highlighting by status
-        self.tree.tag_configure("Pending", background="#FFF4B3", foreground="#333333")   # light yellow
-        self.tree.tag_configure("Completed", background="#CDEEC8", foreground="#223322") # light green
-        self.tree.tag_configure("Deleted", background="#F8D7DA", foreground="#6A1B1A")   # light red
+        self.tree.tag_configure("Pending", background="#FFF4B3", foreground="#333333")
+        self.tree.tag_configure("Completed", background="#CDEEC8", foreground="#223322")
+        self.tree.tag_configure("Deleted", background="#F8D7DA", foreground="#6A1B1A")
 
         self.tree.bind("<Double-1>", lambda e: self.open_pdf())
 
@@ -627,21 +576,20 @@ class VoucherApp(ctk.CTk):
     def perform_search(self):
         rows = search_vouchers(self._get_filters())
         self.tree.delete(*self.tree.get_children())
-        for (vid, created_at, customer, contact, units, status, recipient, pdf) in rows:
+        for (vid, created_at, customer, contact, units, remark, status, recipient, pdf) in rows:
             self.tree.insert("", "end", values=(
                 vid,
                 _to_ui_datetime_str(created_at),
                 customer, contact, units,
-                recipient, status, pdf
+                remark or "", recipient or "", status, pdf
             ), tags=(status,))
-        # ensure colors apply
         self.tree.update_idletasks()
 
     # ---- Create Voucher ----
     def add_voucher_ui(self):
         top = ctk.CTkToplevel(self)
         top.title("Create Voucher")
-        top.geometry("860x620")
+        top.geometry("880x720")
         top.grab_set()
 
         frm = ctk.CTkFrame(top)
@@ -673,6 +621,11 @@ class VoucherApp(ctk.CTk):
             e_recipient.set(staff_values[0])
         e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
 
+        # Remark (new)
+        ctk.CTkLabel(frm, text="Remark", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
+        t_remark = tk.Text(frm, width=66, height=3)
+        t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
+
         btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=(0,12))
 
         def save():
@@ -685,18 +638,16 @@ class VoucherApp(ctk.CTk):
             particulars = t_part.get("1.0","end").strip()
             problem     = t_prob.get("1.0","end").strip()
             recipient   = e_recipient.get().strip()
-            staff_name  = recipient  # keep both columns in sync
+            staff_name  = recipient
+            remark      = t_remark.get("1.0","end").strip()
 
             if not name or not contact:
                 messagebox.showerror("Missing", "Customer name and contact are required."); return
-            voucher_id, pdf_path = add_voucher(name, contact, units, particulars, problem, staff_name, recipient)
+            voucher_id, pdf_path = add_voucher(name, contact, units, particulars, problem, staff_name, recipient, remark)
             messagebox.showinfo("Saved", f"Voucher {voucher_id} created.")
-            try:
-                webbrowser.open_new(os.path.abspath(pdf_path))
-            except Exception:
-                pass
-            top.destroy()
-            self.perform_search()
+            try: webbrowser.open_new(os.path.abspath(pdf_path))
+            except Exception: pass
+            top.destroy(); self.perform_search()
 
         ctk.CTkButton(btns, text="Save & Open PDF", command=save, width=180).pack(side="right")
 
@@ -805,29 +756,25 @@ class VoucherApp(ctk.CTk):
             messagebox.showerror("Error", "Select a record first."); return
 
         values = self.tree.item(sel)["values"]
-        if not values:
-            return
-
+        if not values: return
         voucher_id = values[0]
 
-        # fetch full record from DB
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
         cur.execute("""
             SELECT voucher_id, created_at, customer_name, contact_number, units,
-                   particulars, problem, staff_name, status, recipient
+                   particulars, problem, staff_name, status, recipient, remark
             FROM vouchers WHERE voucher_id = ?
         """, (voucher_id,))
         row = cur.fetchone()
         conn.close()
         if not row: return
 
-        _, created_at, customer_name, contact_number, units, particulars, problem, staff_name, status, recipient = row
+        _, created_at, customer_name, contact_number, units, particulars, problem, staff_name, status, recipient, remark = row
 
-        # open edit window
         top = ctk.CTkToplevel(self)
         top.title(f"Edit Voucher {voucher_id}")
-        top.geometry("860x620")
+        top.geometry("880x720")
         top.grab_set()
 
         frm = ctk.CTkFrame(top)
@@ -836,28 +783,23 @@ class VoucherApp(ctk.CTk):
         WIDE = 520
         r = 0
         ctk.CTkLabel(frm, text="Customer Name").grid(row=r, column=0, sticky="w")
-        e_name = ctk.CTkEntry(frm, width=WIDE)
-        e_name.insert(0, customer_name)
+        e_name = ctk.CTkEntry(frm, width=WIDE); e_name.insert(0, customer_name)
         e_name.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="Contact Number").grid(row=r, column=0, sticky="w")
-        e_contact = ctk.CTkEntry(frm, width=WIDE)
-        e_contact.insert(0, contact_number)
+        e_contact = ctk.CTkEntry(frm, width=WIDE); e_contact.insert(0, contact_number)
         e_contact.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="No. of Units").grid(row=r, column=0, sticky="w")
-        e_units = ctk.CTkEntry(frm, width=120)
-        e_units.insert(0, str(units))
+        e_units = ctk.CTkEntry(frm, width=120); e_units.insert(0, str(units))
         e_units.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="Particulars").grid(row=r, column=0, sticky="w")
-        t_part = tk.Text(frm, width=66, height=5)
-        t_part.insert("1.0", particulars or "")
+        t_part = tk.Text(frm, width=66, height=5); t_part.insert("1.0", particulars or "")
         t_part.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="Problem").grid(row=r, column=0, sticky="w")
-        t_prob = tk.Text(frm, width=66, height=4)
-        t_prob.insert("1.0", problem or "")
+        t_prob = tk.Text(frm, width=66, height=4); t_prob.insert("1.0", problem or "")
         t_prob.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="Recipient").grid(row=r, column=0, sticky="w")
@@ -865,6 +807,10 @@ class VoucherApp(ctk.CTk):
         e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
         e_recipient.set(recipient or staff_name or "")
         e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+
+        ctk.CTkLabel(frm, text="Remark").grid(row=r, column=0, sticky="w")
+        t_remark = tk.Text(frm, width=66, height=3); t_remark.insert("1.0", remark or "")
+        t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
         def save_edit():
             name = e_name.get().strip()
@@ -876,28 +822,28 @@ class VoucherApp(ctk.CTk):
             particulars_val = t_part.get("1.0","end").strip()
             problem_val     = t_prob.get("1.0","end").strip()
             recipient_val   = e_recipient.get().strip()
+            remark_val      = t_remark.get("1.0","end").strip()
             staff_val       = recipient_val
 
             conn = sqlite3.connect(DB_FILE)
             cur = conn.cursor()
             cur.execute("""UPDATE vouchers
                               SET customer_name=?, contact_number=?, units=?, particulars=?,
-                                  problem=?, staff_name=?, recipient=?
+                                  problem=?, staff_name=?, recipient=?, remark=?
                             WHERE voucher_id=?""",
                         (name, contact, units_val, particulars_val,
-                         problem_val, staff_val, recipient_val, voucher_id))
+                         problem_val, staff_val, recipient_val, remark_val, voucher_id))
             conn.commit()
+            # regenerate PDF (layout unchanged)
             pdf_path = generate_pdf(
                 str(voucher_id), name, contact, units_val,
                 particulars_val, problem_val, staff_val, status, created_at, recipient_val
             )
             cur.execute("UPDATE vouchers SET pdf_path=? WHERE voucher_id=?", (pdf_path, str(voucher_id)))
-            conn.commit()
-            conn.close()
+            conn.commit(); conn.close()
 
             messagebox.showinfo("Updated", f"Voucher {voucher_id} updated.")
-            top.destroy()
-            self.perform_search()
+            top.destroy(); self.perform_search()
 
         btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=12)
         ctk.CTkButton(btns, text="Save Changes", command=save_edit, width=160).pack(side="right", padx=6)
@@ -915,25 +861,21 @@ class VoucherApp(ctk.CTk):
         current_base = _read_base_vid()
         ctk.CTkLabel(frm, text=f"Current Base VID: {current_base}", anchor="w").pack(fill="x", pady=(0,8))
         entry = ctk.CTkEntry(frm, placeholder_text="Enter new base voucher ID (integer)")
-        entry.pack(fill="x")
-        entry.insert(0, str(current_base))
-
-        info = ctk.CTkLabel(frm, text="If there are existing vouchers, all voucher IDs will shift by the difference.\nPDFs will be regenerated.", justify="left")
+        entry.pack(fill="x"); entry.insert(0, str(current_base))
+        info = ctk.CTkLabel(frm, text="Existing vouchers will shift by the difference. PDFs will be regenerated.", justify="left")
         info.pack(fill="x", pady=8)
 
         def apply():
             new_base_str = entry.get().strip()
             if not new_base_str.isdigit():
-                messagebox.showerror("Invalid", "Please enter a positive integer.")
-                return
+                messagebox.showerror("Invalid", "Please enter a positive integer."); return
             new_base = int(new_base_str)
             try:
                 delta = modify_base_vid(new_base)
-                messagebox.showinfo("Done", f"Base VID set to {new_base}.\nShift applied: {delta:+d}.")
+                messagebox.showinfo("Done", f"Base VID set to {new_base}. Shift: {delta:+d}.")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to modify base VID:\n{e}")
-            top.destroy()
-            self.perform_search()
+            top.destroy(); self.perform_search()
 
         btns = ctk.CTkFrame(frm); btns.pack(fill="x", pady=(8,0))
         ctk.CTkButton(btns, text="Apply", command=apply, width=120).pack(side="right", padx=4)
