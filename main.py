@@ -333,8 +333,8 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
 
     # ------- Signatures (side-by-side, a bit lower) -------
     sig_gap_above = 2*mm
-    candidate_y_sig = policies_bottom - sig_gap_above
-    half_limit = height/2 
+    candidate_y_sig = policies_bottom + sig_gap_above
+    half_limit = height/2 - 20*mm
     y_sig = max(candidate_y_sig, half_limit)
 
     SIG_LINE_W = 45*mm
