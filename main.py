@@ -399,7 +399,9 @@ def mark_deleted(voucher_id):
 def search_vouchers(filters):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, remark, status, recipient, pdf_path "
+    # NOTE: order matches the table columns below (remark moved to far right)
+    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, "
+           "recipient, status, remark, pdf_path "
            "FROM vouchers WHERE 1=1")
     params = []
     if filters.get("voucher_id"):
@@ -474,6 +476,9 @@ class VoucherApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
         self.minsize(980, 560)
 
+        # Always open fullscreen / maximized
+        self.after(50, self._go_fullscreen)
+
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
@@ -497,14 +502,14 @@ class VoucherApp(ctk.CTk):
         self.btn_search = ctk.CTkButton(filt, text="Search", command=self.perform_search, width=100); self.btn_search.grid(row=0, column=6, padx=5)
         self.btn_reset  = ctk.CTkButton(filt, text="Reset",  command=self.reset_filters, width=80);   self.btn_reset.grid(row=0, column=7, padx=5)
 
-        # ---- Table (Remark added; Recipient before Status) ----
+        # ---- Table (Remark moved to far-right; Recipient before Status) ----
         table_frame = ctk.CTkFrame(self)
         table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
         self.tree = ttk.Treeview(table_frame,
-            columns=("VoucherID","Date","Customer","Contact","Units","Remark","Recipient","Status","PDF"),
+            columns=("VoucherID","Date","Customer","Contact","Units","Recipient","Status","Remark","PDF"),
             show="headings")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
@@ -516,9 +521,9 @@ class VoucherApp(ctk.CTk):
 
         self.col_weights = {
             "VoucherID":1, "Date":2, "Customer":2, "Contact":2,
-            "Units":1, "Remark":2, "Recipient":2, "Status":1
+            "Units":1, "Recipient":2, "Status":1, "Remark":3
         }
-        for col in ("VoucherID","Date","Customer","Contact","Units","Remark","Recipient","Status"):
+        for col in ("VoucherID","Date","Customer","Contact","Units","Recipient","Status","Remark"):
             self.tree.heading(col, text=col)
             self.tree.column(col, anchor="w", stretch=True, width=80)
         self.tree.heading("PDF", text="PDF")
@@ -553,6 +558,19 @@ class VoucherApp(ctk.CTk):
 
         self.perform_search()
 
+    def _go_fullscreen(self):
+        """Open maximized/fullscreen depending on platform."""
+        try:
+            if sys.platform.startswith("win") or sys.platform.startswith("linux"):
+                # maximized window with title bar (common UX on Win/Linux)
+                self.state("zoomed")
+            else:
+                # macOS true fullscreen
+                self.attributes("-fullscreen", True)
+        except Exception:
+            # fallback
+            self.attributes("-fullscreen", True)
+
     # ---- Filters helpers ----
     def _get_filters(self):
         return {
@@ -576,12 +594,13 @@ class VoucherApp(ctk.CTk):
     def perform_search(self):
         rows = search_vouchers(self._get_filters())
         self.tree.delete(*self.tree.get_children())
-        for (vid, created_at, customer, contact, units, remark, status, recipient, pdf) in rows:
+        # rows order: (vid, created_at, customer, contact, units, recipient, status, remark, pdf)
+        for (vid, created_at, customer, contact, units, recipient, status, remark, pdf) in rows:
             self.tree.insert("", "end", values=(
                 vid,
                 _to_ui_datetime_str(created_at),
                 customer, contact, units,
-                remark or "", recipient or "", status, pdf
+                recipient or "", status, remark or "", pdf
             ), tags=(status,))
         self.tree.update_idletasks()
 
@@ -621,7 +640,7 @@ class VoucherApp(ctk.CTk):
             e_recipient.set(staff_values[0])
         e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
 
-        # Remark (new)
+        # Remark
         ctk.CTkLabel(frm, text="Remark", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
         t_remark = tk.Text(frm, width=66, height=3)
         t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
