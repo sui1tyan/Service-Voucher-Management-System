@@ -28,6 +28,7 @@ jobs:
       - name: Build ONEDIR
         run: |
           pyinstaller --clean --onedir --noconsole main.py --name ServiceVoucherApp `
+            --add-data "logo.jpg;." `
             --exclude-module pillow_avif `
             --exclude-module PIL._avif `
             --noupx
@@ -52,6 +53,7 @@ jobs:
       - name: Build ONEFILE (tries to avoid extraction errors)
         run: |
           pyinstaller --clean --onefile --noconsole main.py --name ServiceVoucherApp `
+            --add-data "logo.jpg;." `
             --exclude-module pillow_avif `
             --exclude-module PIL._avif `
             --noupx `
