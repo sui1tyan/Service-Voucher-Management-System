@@ -273,7 +273,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     # ------- NEW: Acknowledgement sentence (right half, just under table) -------
     ack_text = ("WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND "
                 "REPAIRED SATISFACTORILY")
-    ack_left   = name_col_x + 4*mm               # start just to the right of middle vertical line
+    ack_left   = name_col_x + 10*mm               # start just to the right of middle vertical line
     ack_right  = right - 6*mm
     ack_width  = max(20*mm, ack_right - ack_left)
     ack_top_y  = bottom_table - 2*mm             # 2mm gap below table border to avoid overlap
