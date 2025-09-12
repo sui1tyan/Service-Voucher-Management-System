@@ -272,7 +272,7 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
 
     # ------- NEW: Acknowledgement sentence (right half, just under table) -------
     ack_text = ("WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND "
-                "REPAIRED SATICFACTORILY")
+                "REPAIRED SATISFACTORILY")
     ack_left   = name_col_x + 4*mm               # start just to the right of middle vertical line
     ack_right  = right - 6*mm
     ack_width  = max(20*mm, ack_right - ack_left)
@@ -297,15 +297,15 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     policies_w   = left_col_w - 1.5*mm
 
     p1 = "Kindly collect your goods within <font color='red' size='9'>60 days</font> from date of sending for repair."
-    used_h = draw_wrapped_top(c, p1, left, policies_top, policies_w, fontsize=7.5, leading=10)
+    used_h = draw_wrapped_top(c, p1, left, policies_top, policies_w, fontsize=6.5, leading=10)
     y_cursor = policies_top - used_h - 2
 
     used_h = draw_wrapped_top(c, "A) We do not hold ourselves responsible for any loss or damage.",
-                              left, y_cursor, policies_w, fontsize=7.5, leading=10)
+                              left, y_cursor, policies_w, fontsize=6.5, leading=10)
     y_cursor -= used_h - 1
 
     used_h = draw_wrapped_top(c, "B) We reserve our right to sell off the goods to cover our cost and loss.",
-                              left, y_cursor, policies_w, fontsize=7.5, leading=10)
+                              left, y_cursor, policies_w, fontsize=6.5, leading=10)
     y_cursor -= used_h + 2
 
     p4 = ("MINIMUM <font color='red' size='9'><b>RM60.00</b></font> WILL BE CHARGED ON TROUBLESHOOTING, "
@@ -332,9 +332,9 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
         pass
 
     # ------- Signatures (side-by-side, a bit lower) -------
-    sig_gap_above = 6*mm
+    sig_gap_above = 2*mm
     candidate_y_sig = policies_bottom - sig_gap_above
-    half_limit = height/2 + 5*mm
+    half_limit = height/2 
     y_sig = max(candidate_y_sig, half_limit)
 
     SIG_LINE_W = 45*mm
