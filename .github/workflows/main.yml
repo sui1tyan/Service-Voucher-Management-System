@@ -31,7 +31,7 @@ jobs:
             --add-data "logo.jpg;." `
             --exclude-module pillow_avif `
             --exclude-module PIL._avif `
-            --noupx
+            --noupx    
 
       - name: Zip ONEDIR artifact
         run: |
@@ -42,26 +42,3 @@ jobs:
         with:
           name: ServiceVoucherApp-onedir
           path: dist/ServiceVoucherApp_onedir.zip
-
-      # ---------------- ONEFILE (alternative) ----------------
-      - name: Prepare custom runtime temp dir (for ONEFILE)
-        run: |
-          $TMPDIR = "$env:LOCALAPPDATA\Temp\svcapp"
-          New-Item -ItemType Directory -Force -Path $TMPDIR | Out-Null
-          echo "TMPDIR=$TMPDIR" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Build ONEFILE (tries to avoid extraction errors)
-        run: |
-          pyinstaller --clean --onefile --noconsole main.py --name ServiceVoucherApp `
-            --add-data "logo.jpg;." `
-            --exclude-module pillow_avif `
-            --exclude-module PIL._avif `
-            --noupx `
-            --runtime-tmpdir "$env:TMPDIR"
-
-      - name: Upload ONEFILE artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ServiceVoucherApp-onefile
-          path: dist/ServiceVoucherApp.exe
