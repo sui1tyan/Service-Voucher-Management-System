@@ -64,7 +64,7 @@ os.makedirs(PDF_DIR, exist_ok=True)
 SHOP_NAME = "TONY.COM"
 SHOP_ADDR = "TB4318, Lot 5, Block 31, Fajar Complex  91000 Tawau Sabah, Malaysia"
 SHOP_TEL  = "Tel : 089-763778, H/P: 0168260533"
-LOGO_PATH = ""  # optional: path to logo image (png/jpg). leave blank to skip
+LOGO_PATH = "logo.jpg"  # optional: path to logo image (png/jpg). leave blank to skip
 
 DEFAULT_BASE_VID = 41000  # used only at first run
 
