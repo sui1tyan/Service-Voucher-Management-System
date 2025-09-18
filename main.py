@@ -611,24 +611,24 @@ class LoginDialog(ctk.CTkToplevel):
         self.e_pwd.configure(show="" if self.var_show.get() else "•")
 
     def _do_login(self):
-    u = (self.e_user.get() or "").strip()
-    p = (self.e_pwd.get() or "").strip()
-    if not u or not p:
-        messagebox.showerror("Login", "Please enter username and password.")
-        return
-    row = get_user_by_username(u)
-    if not row:
-        messagebox.showerror("Login", "Invalid credentials.")
-        return
-    uid, username, role, pwdhash, is_active, must_change = row
-    if not is_active:
-        messagebox.showerror("Login", "Account is disabled.")
-        return
-    if not _verify_pwd(p, pwdhash):
-        messagebox.showerror("Login", "Invalid credentials.")
-        return
-    self.result = {"id": uid, "username": username, "role": role}
-    self.destroy()
+        u = (self.e_user.get() or "").strip()
+        p = (self.e_pwd.get() or "").strip()
+        if not u or not p:
+            messagebox.showerror("Login", "Please enter username and password.")
+            return
+        row = get_user_by_username(u)
+        if not row:
+            messagebox.showerror("Login", "Invalid credentials.")
+            return
+        uid, username, role, pwdhash, is_active, must_change = row
+        if not is_active:
+            messagebox.showerror("Login", "Account is disabled.")
+            return
+        if not _verify_pwd(p, pwdhash):
+            messagebox.showerror("Login", "Invalid credentials.")
+            return
+        self.result = {"id": uid, "username": username, "role": role}
+        self.destroy()
 
 
 # ---------- Helpers for CTk buttons (white, black outline) ----------
