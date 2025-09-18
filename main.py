@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Service Voucher Management System (Monolith)
 # Deps: customtkinter, reportlab, qrcode, pillow
+# Optional deps for Excel export: pandas, openpyxl
 # Run:  python main.py
 
 import os
@@ -9,13 +10,20 @@ import sqlite3
 import webbrowser
 from datetime import datetime
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, filedialog
 import customtkinter as ctk
 import qrcode
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
+
+# ---- Optional: Excel export ----
+try:
+    import pandas as pd  # type: ignore
+    _HAS_PANDAS = True
+except Exception:
+    _HAS_PANDAS = False
 
 # ---------- Wrapped text helpers ----------
 from reportlab.platypus import Paragraph
@@ -43,9 +51,14 @@ def draw_wrapped_top(c, text, x, top_y, w, fontsize=10, bold=False, leading=None
     para.drawOn(c, x, top_y - h_used)
     return h_used
 
-# ------------------ Config ------------------
-DB_FILE   = "vouchers.db"
-PDF_DIR   = "pdfs"
+# ------------------ Paths/Config ------------------
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(sys.executable)
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DB_FILE   = os.path.join(APP_DIR, "vouchers.db")
+PDF_DIR   = os.path.join(APP_DIR, "pdfs")
 os.makedirs(PDF_DIR, exist_ok=True)
 
 SHOP_NAME = "TONY.COM"
@@ -66,15 +79,15 @@ def _to_ui_datetime_str(iso_str: str) -> str:
     except Exception:
         return iso_str
 
-def _from_ui_date_to_sqldate(s: str) -> str:
+def _from_ui_date_to_sqldate(s: str):
     s = (s or "").strip()
     if not s:
-        return ""
+        return None
     try:
         d = datetime.strptime(s, "%d-%m-%Y")
         return d.strftime("%Y-%m-%d")
     except Exception:
-        return ""
+        return None
 
 # ------------------ DB ------------------
 BASE_SCHEMA = """
@@ -191,26 +204,20 @@ def delete_staff(name: str):
     conn.commit()
     conn.close()
 
-# ------------------ PDF ------------------
-def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
-                  units, particulars, problem, staff_name, created_at, recipient):
-    # Margins / frame
-    left   = 12*mm
-    right  = width - 12*mm
-    top_y  = height - 15*mm
-    y      = top_y
+# ------------------ PDF (helpers) ------------------
+def _draw_header(c, left, right, top_y, voucher_id):
+    # Logo (optional) on right; shop text on left
+    y = top_y
+    LOGO_W = 28*mm
+    LOGO_H = 18*mm
+    logo_drawn = False
+    if LOGO_PATH and os.path.exists(LOGO_PATH):
+        try:
+            c.drawImage(LOGO_PATH, right - LOGO_W, y - LOGO_H, LOGO_W, LOGO_H, preserveAspectRatio=True, mask='auto')
+            logo_drawn = True
+        except Exception:
+            logo_drawn = False
 
-    qty_col_w    = 20*mm
-    left_col_w   = 74*mm
-    middle_col_w = (right - left) - left_col_w - qty_col_w
-
-    name_col_x = left + left_col_w
-    qty_col_x  = right - qty_col_w
-
-    row1_h = 20*mm
-    row2_h = 20*mm
-
-    # --- Header ---
     c.setFont("Helvetica-Bold", 14); c.drawString(left, y, SHOP_NAME)
     c.setFont("Helvetica", 9.2)
     c.drawString(left, y - 5.0*mm, SHOP_ADDR)
@@ -219,27 +226,34 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     c.setFont("Helvetica-Bold", 13)
     c.drawCentredString((left+right)/2, y - 16.0*mm, "SERVICE VOUCHER")
     c.drawRightString(right, y - 16.0*mm, f"No : {voucher_id}")
+    return y - 16.0*mm  # returns the baseline y used by title
 
-    # date/time
+def _draw_datetime_row(c, left, right, base_y, created_at):
     try:
         dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
         date_str = dt.strftime("%d-%m-%Y")
         time_str = dt.strftime("%H:%M:%S")
     except Exception:
         date_str = created_at[:10]; time_str = created_at[11:19]
-
     c.setFont("Helvetica", 10)
-    c.drawString(left, y - 24.0*mm, "Date :")
-    c.drawString(left + 18*mm, y - 24.0*mm, date_str)
-    c.drawRightString(right - 27*mm, y - 24.0*mm, "Time In :")
-    c.drawRightString(right, y - 24.0*mm, time_str)
+    c.drawString(left, base_y - 8.0*mm, "Date :")
+    c.drawString(left + 18*mm, base_y - 8.0*mm, date_str)
+    c.drawRightString(right - 27*mm, base_y - 8.0*mm, "Time In :")
+    c.drawRightString(right, base_y - 8.0*mm, time_str)
 
-    # --- Table frame ---
-    top_table = y - 28*mm
+def _draw_main_table(c, left, right, top_table, customer_name, particulars, units, contact_number, problem):
+    qty_col_w    = 20*mm
+    left_col_w   = 74*mm
+    middle_col_w = (right - left) - left_col_w - qty_col_w
+    name_col_x = left + left_col_w
+    qty_col_x  = right - qty_col_w
+    row1_h = 20*mm
+    row2_h = 20*mm
     bottom_table = top_table - (row1_h + row2_h)
     mid_y = top_table - row1_h
     pad = 3*mm
 
+    # Frame
     c.rect(left, bottom_table, right-left, (row1_h + row2_h), stroke=1, fill=0)
     c.line(name_col_x, top_table, name_col_x, bottom_table)
     c.line(qty_col_x, top_table, qty_col_x, mid_y)
@@ -257,11 +271,11 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     draw_wrapped(c, particulars or "-", name_col_x + pad, mid_y + pad,
                  w=middle_col_w - 2*pad, h=row1_h - 2*pad - 10, fontsize=10)
 
-    # Row 1 Right: QTY (value in upper cell)
+    # Row 1 Right: QTY
     c.setFont("Helvetica-Bold", 10.4)
     c.drawCentredString(qty_col_x + qty_col_w/2, top_table - pad - 8, "QTY")
     c.setFont("Helvetica", 11)
-    c.drawCentredString(qty_col_x + qty_col_w/2, mid_y + (row1_h/2) - 3, str(units or 1))
+    c.drawCentredString(qty_col_x + qty_col_w/2, mid_y + (row1_h/2) - 3, str(max(1, int(units or 1))))
 
     # Row 2 Left: TEL
     c.setFont("Helvetica-Bold", 10.4)
@@ -275,10 +289,13 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     draw_wrapped(c, problem or "-", name_col_x + pad, bottom_table + pad,
                  w=(middle_col_w + qty_col_w) - 2*pad, h=row2_h - 2*pad - 10, fontsize=10)
 
+    return bottom_table, left_col_w, name_col_x
+
+def _draw_policies_and_signatures(c, left, right, bottom_table, left_col_w, recipient, voucher_id, customer_name, contact_number, date_str):
     # Acknowledgement sentence (right half)
     ack_text = ("WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND "
                 "REPAIRED SATISFACTORILY")
-    ack_left   = name_col_x + 10*mm
+    ack_left   = left + left_col_w + 10*mm
     ack_right  = right - 6*mm
     ack_width  = max(20*mm, ack_right - ack_left)
     ack_top_y  = bottom_table - 5*mm
@@ -321,26 +338,24 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
                               left, y_cursor, policies_w, fontsize=8, leading=10)
     policies_bottom = y_cursor - used_h
 
-    # QR
+    # QR — anchor near bottom-right safely above signature lines
     qr_size = 20*mm
     try:
         qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{date_str}"
         qr_img  = qrcode.make(qr_data)
-        qr_y = policies_top - (qr_size * 0.2)
-        c.drawImage(ImageReader(qr_img), right - qr_size, qr_y - qr_size, qr_size, qr_size)
+        margin = 10*mm
+        qr_x = right - qr_size
+        qr_y = max(policies_bottom + 3*mm, margin + qr_size)  # ensure not below bottom margin
+        c.drawImage(ImageReader(qr_img), qr_x, qr_y - qr_size, qr_size, qr_size)
     except Exception:
         pass
 
     # Signatures
-    sig_gap_above = 2*mm
-    candidate_y_sig = policies_bottom + sig_gap_above
-    half_limit = height/2 - 20*mm
-    y_sig = max(candidate_y_sig, half_limit)
-
     SIG_LINE_W = 45*mm
     SIG_GAP    = 6*mm
-    sig_left_start = right - (2*SIG_LINE_W + SIG_GAP)
+    y_sig = max(policies_bottom + 4*mm, (A4[1]/2) - 20*mm)  # avoid too high/low
 
+    sig_left_start = right - (2*SIG_LINE_W + SIG_GAP)
     c.line(sig_left_start, y_sig, sig_left_start + SIG_LINE_W, y_sig)
     c.setFont("Helvetica", 8.8)
     c.drawString(sig_left_start, y_sig - 3.6*mm, "CUSTOMER SIGNATURE")
@@ -348,6 +363,36 @@ def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
     right_line_x0 = sig_left_start + SIG_LINE_W + SIG_GAP
     c.line(right_line_x0, y_sig, right_line_x0 + SIG_LINE_W, y_sig)
     c.drawString(right_line_x0, y_sig - 3.6*mm, "DATE COLLECTED")
+
+def _draw_voucher(c, width, height, voucher_id, customer_name, contact_number,
+                  units, particulars, problem, staff_name, created_at, recipient):
+    # Margins
+    left   = 12*mm
+    right  = width - 12*mm
+    top_y  = height - 15*mm
+
+    # Header + Title
+    title_baseline = _draw_header(c, left, right, top_y, voucher_id)
+    _draw_datetime_row(c, left, right, title_baseline, created_at)
+
+    # Main table
+    top_table = title_baseline - 12*mm
+    bottom_table, left_col_w, name_col_x = _draw_main_table(
+        c, left, right, top_table, customer_name, particulars, units, contact_number, problem
+    )
+
+    # Date string for QR composition
+    try:
+        dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+        date_str = dt.strftime("%d-%m-%Y")
+    except Exception:
+        date_str = created_at[:10]
+
+    # Policies + QR + signatures
+    _draw_policies_and_signatures(
+        c, left, right, bottom_table, left_col_w, recipient,
+        voucher_id, customer_name, contact_number, date_str
+    )
 
 def generate_pdf(voucher_id, customer_name, contact_number, units,
                  particulars, problem, staff_name, status, created_at, recipient):
@@ -396,10 +441,7 @@ def mark_deleted(voucher_id):
     conn.commit()
     conn.close()
 
-def search_vouchers(filters):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    # NOTE: order matches the table columns below (remark moved to far right)
+def _build_search_sql(filters):
     sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, "
            "recipient, status, remark, pdf_path "
            "FROM vouchers WHERE 1=1")
@@ -407,16 +449,27 @@ def search_vouchers(filters):
     if filters.get("voucher_id"):
         sql += " AND voucher_id LIKE ?"; params.append(f"%{filters['voucher_id']}%")
     if filters.get("name"):
-        sql += " AND customer_name LIKE ?"; params.append(f"%{filters['name']}%")
+        sql += " AND customer_name LIKE ? COLLATE NOCASE"; params.append(f"%{filters['name']}%")
     if filters.get("contact"):
         sql += " AND contact_number LIKE ?"; params.append(f"%{filters['contact']}%")
-    if filters.get("date_from"):
-        sql += " AND created_at >= ?"; params.append(filters["date_from"].strip() + " 00:00:00")
-    if filters.get("date_to"):
-        sql += " AND created_at <= ?"; params.append(filters["date_to"].strip() + " 23:59:59")
+
+    df = filters.get("date_from")
+    dt = filters.get("date_to")
+    if df:
+        sql += " AND created_at >= ?"; params.append(df + " 00:00:00")
+    if dt:
+        sql += " AND created_at <= ?"; params.append(dt + " 23:59:59")
+
     if filters.get("status") and filters["status"] != "All":
         sql += " AND status = ?"; params.append(filters["status"])
+
     sql += " ORDER BY CAST(voucher_id AS INTEGER) DESC"
+    return sql, params
+
+def search_vouchers(filters):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    sql, params = _build_search_sql(filters)
     cur.execute(sql, params)
     rows = cur.fetchall()
     conn.close()
@@ -452,7 +505,8 @@ def modify_base_vid(new_base: int):
         old_id = int(vid)
         new_id = old_id + delta
         try:
-            if old_pdf and os.path.exists(old_pdf): os.remove(old_pdf)
+            if old_pdf and os.path.exists(old_pdf):
+                os.remove(old_pdf)
         except Exception:
             pass
         cur.execute("UPDATE vouchers SET voucher_id=? WHERE voucher_id=?", (str(new_id), str(old_id)))
@@ -471,7 +525,7 @@ class VoucherApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Service Voucher Management System")
-        self.geometry("1200x700")
+        self.geometry("1200x720")
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         self.minsize(980, 560)
@@ -485,9 +539,9 @@ class VoucherApp(ctk.CTk):
         # ---- Filters ----
         filt = ctk.CTkFrame(self)
         filt.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-        for i in range(10):
+        for i in range(12):
             filt.grid_columnconfigure(i, weight=0)
-        filt.grid_columnconfigure(9, weight=1)
+        filt.grid_columnconfigure(11, weight=1)
 
         today_ui = _to_ui_date(datetime.now())
         self.f_voucher = ctk.CTkEntry(filt, width=130, placeholder_text="VoucherID");    self.f_voucher.grid(row=0, column=0, padx=5)
@@ -495,12 +549,19 @@ class VoucherApp(ctk.CTk):
         self.f_contact = ctk.CTkEntry(filt, width=180, placeholder_text="Contact Number"); self.f_contact.grid(row=0, column=2, padx=5)
         self.f_from    = ctk.CTkEntry(filt, width=160, placeholder_text="Date From (DD-MM-YYYY)"); self.f_from.grid(row=0, column=3, padx=5)
         self.f_to      = ctk.CTkEntry(filt, width=160, placeholder_text="Date To (DD-MM-YYYY)");   self.f_to.grid(row=0, column=4, padx=5)
-        self.f_from.insert(0, today_ui); self.f_to.insert(0, today_ui)
+        # default: show everything until today
+        self.f_to.insert(0, today_ui)
 
         self.f_status  = ctk.CTkOptionMenu(filt, values=["All","Pending","Completed","Deleted"], width=140); self.f_status.grid(row=0, column=5, padx=(8,5))
         self.f_status.set("All")
         self.btn_search = ctk.CTkButton(filt, text="Search", command=self.perform_search, width=100); self.btn_search.grid(row=0, column=6, padx=5)
         self.btn_reset  = ctk.CTkButton(filt, text="Reset",  command=self.reset_filters, width=80);   self.btn_reset.grid(row=0, column=7, padx=5)
+
+        # ---- Export buttons ----
+        exp_frame = ctk.CTkFrame(filt)
+        exp_frame.grid(row=0, column=8, padx=10)
+        ctk.CTkButton(exp_frame, text="Export CSV", command=self.export_csv, width=110).pack(side="left", padx=5)
+        ctk.CTkButton(exp_frame, text="Export Excel", command=self.export_excel, width=120).pack(side="left", padx=5)
 
         # ---- Table (Remark moved to far-right; Recipient before Status) ----
         table_frame = ctk.CTkFrame(self)
@@ -546,15 +607,16 @@ class VoucherApp(ctk.CTk):
         # ---- Actions ----
         bar = ctk.CTkFrame(self)
         bar.grid(row=2, column=0, sticky="ew", padx=10, pady=(0,10))
-        for i in range(12): bar.grid_columnconfigure(i, weight=0)
+        for i in range(14): bar.grid_columnconfigure(i, weight=0)
 
         ctk.CTkButton(bar, text="Add Voucher",        command=self.add_voucher_ui,    width=120).grid(row=0, column=0, padx=6, pady=8)
         ctk.CTkButton(bar, text="Edit Selected",      command=self.edit_selected,     width=120).grid(row=0, column=1, padx=6, pady=8)
         ctk.CTkButton(bar, text="Mark Completed",     command=self.mark_selected_completed, width=140).grid(row=0, column=2, padx=6, pady=8)
         ctk.CTkButton(bar, text="Mark Deleted",       command=self.mark_selected_deleted,   width=130, fg_color="#d9534f", hover_color="#c9302c").grid(row=0, column=3, padx=6, pady=8)
         ctk.CTkButton(bar, text="Open PDF",           command=self.open_pdf,          width=110).grid(row=0, column=4, padx=6, pady=8)
-        ctk.CTkButton(bar, text="Manage Recipients",  command=self.manage_staffs_ui,  width=160).grid(row=0, column=5, padx=6, pady=8)
-        ctk.CTkButton(bar, text="Modify Base VID",    command=self.modify_base_vid_ui, width=150).grid(row=0, column=6, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Open PDF Folder",    command=self.open_pdf_folder,   width=150).grid(row=0, column=5, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Manage Recipients",  command=self.manage_staffs_ui,  width=160).grid(row=0, column=6, padx=6, pady=8)
+        ctk.CTkButton(bar, text="Modify Base VID",    command=self.modify_base_vid_ui, width=150).grid(row=0, column=7, padx=6, pady=8)
 
         self.perform_search()
 
@@ -562,13 +624,10 @@ class VoucherApp(ctk.CTk):
         """Open maximized/fullscreen depending on platform."""
         try:
             if sys.platform.startswith("win") or sys.platform.startswith("linux"):
-                # maximized window with title bar (common UX on Win/Linux)
                 self.state("zoomed")
             else:
-                # macOS true fullscreen
                 self.attributes("-fullscreen", True)
         except Exception:
-            # fallback
             self.attributes("-fullscreen", True)
 
     # ---- Filters helpers ----
@@ -586,7 +645,6 @@ class VoucherApp(ctk.CTk):
         for e in (self.f_voucher, self.f_name, self.f_contact, self.f_from, self.f_to):
             e.delete(0, "end")
         today_ui = _to_ui_date(datetime.now())
-        self.f_from.insert(0, today_ui)
         self.f_to.insert(0, today_ui)
         self.f_status.set("All")
         self.perform_search()
@@ -608,30 +666,41 @@ class VoucherApp(ctk.CTk):
     def add_voucher_ui(self):
         top = ctk.CTkToplevel(self)
         top.title("Create Voucher")
-        top.geometry("880x720")
+        top.geometry("900x740")
         top.grab_set()
 
         frm = ctk.CTkFrame(top)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
+        frm.grid_columnconfigure(1, weight=1)
 
-        WIDE = 520
-
+        WIDE = 540
         r = 0
         ctk.CTkLabel(frm, text="Customer Name", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
-        e_name = ctk.CTkEntry(frm, width=WIDE); e_name.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
+        e_name = ctk.CTkEntry(frm, width=WIDE); e_name.grid(row=r, column=1, sticky="ew", padx=10, pady=(0,8)); r+=1
 
         ctk.CTkLabel(frm, text="Contact Number", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
-        e_contact = ctk.CTkEntry(frm, width=WIDE); e_contact.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
+        e_contact = ctk.CTkEntry(frm, width=WIDE); e_contact.grid(row=r, column=1, sticky="ew", padx=10, pady=(0,8)); r+=1
 
         ctk.CTkLabel(frm, text="No. of Units", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
         e_units = ctk.CTkEntry(frm, width=120); e_units.insert(0,"1")
         e_units.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
 
+        # Text with scrollbar helper
+        def mk_text(parent, width, height):
+            wrap = ctk.CTkFrame(parent)
+            wrap.grid_columnconfigure(0, weight=1)
+            txt = tk.Text(wrap, width=width, height=height)
+            sb  = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview)
+            txt.configure(yscrollcommand=sb.set)
+            txt.grid(row=0, column=0, sticky="nsew")
+            sb.grid(row=0, column=1, sticky="ns")
+            return wrap, txt
+
         ctk.CTkLabel(frm, text="Particulars", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
-        t_part = tk.Text(frm, width=66, height=5); t_part.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
+        part_wrap, t_part = mk_text(frm, width=66, height=6); part_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=(0,8)); r+=1
 
         ctk.CTkLabel(frm, text="Problem", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
-        t_prob = tk.Text(frm, width=66, height=4); t_prob.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
+        prob_wrap, t_prob = mk_text(frm, width=66, height=5); prob_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=(0,8)); r+=1
 
         ctk.CTkLabel(frm, text="Recipient", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
         staff_values = list_staffs() or [""]
@@ -642,18 +711,21 @@ class VoucherApp(ctk.CTk):
 
         # Remark
         ctk.CTkLabel(frm, text="Remark", anchor="w").grid(row=r, column=0, sticky="w", pady=(0,2))
-        t_remark = tk.Text(frm, width=66, height=3)
-        t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=(0,8)); r+=1
+        rem_wrap, t_remark = mk_text(frm, width=66, height=4)
+        rem_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=(0,8)); r+=1
 
         btns = ctk.CTkFrame(top); btns.pack(fill="x", padx=12, pady=(0,12))
 
         def save():
             name = e_name.get().strip()
             contact = e_contact.get().strip()
+            # Validate units positive int
             try:
                 units = int((e_units.get() or "1").strip())
+                if units <= 0:
+                    raise ValueError
             except ValueError:
-                messagebox.showerror("Invalid", "Units must be a number."); return
+                messagebox.showerror("Invalid", "Units must be a positive integer."); return
             particulars = t_part.get("1.0","end").strip()
             problem     = t_prob.get("1.0","end").strip()
             recipient   = e_recipient.get().strip()
@@ -729,20 +801,29 @@ class VoucherApp(ctk.CTk):
         refresh_list()
 
     # ---- Row actions ----
-    def mark_selected_completed(self):
+    def _selected_voucher(self):
         sel = self.tree.focus()
         if not sel:
+            return None
+        values = self.tree.item(sel)["values"]
+        if not values:
+            return None
+        return values  # [vid, created_at, ... , pdf]
+
+    def mark_selected_completed(self):
+        values = self._selected_voucher()
+        if not values:
             messagebox.showerror("Error", "Select a record first."); return
-        voucher_id = self.tree.item(sel)["values"][0]
+        voucher_id = values[0]
         mark_completed(voucher_id)
         messagebox.showinfo("Updated", f"Voucher {voucher_id} marked as Completed.")
         self.perform_search()
 
     def mark_selected_deleted(self):
-        sel = self.tree.focus()
-        if not sel:
+        values = self._selected_voucher()
+        if not values:
             messagebox.showerror("Error", "Select a record first."); return
-        voucher_id = str(self.tree.item(sel)["values"][0])
+        voucher_id = str(values[0])
         if not messagebox.askyesno("Confirm Delete (Soft)",
                                    f"Mark voucher {voucher_id} as Deleted?\n"
                                    f"This will NOT renumber other vouchers."):
@@ -755,10 +836,10 @@ class VoucherApp(ctk.CTk):
         self.perform_search()
 
     def open_pdf(self):
-        sel = self.tree.focus()
-        if not sel:
+        values = self._selected_voucher()
+        if not values:
             messagebox.showerror("Error", "Select a record first."); return
-        pdf_path = self.tree.item(sel)["values"][-1]
+        pdf_path = values[-1]
         if not pdf_path or not os.path.exists(pdf_path):
             messagebox.showerror("Error", "PDF not found for this voucher."); return
         try:
@@ -769,57 +850,78 @@ class VoucherApp(ctk.CTk):
             else:
                 os.system(f"open '{pdf_path}'" if sys.platform == "darwin" else f"xdg-open '{pdf_path}'")
 
+    def open_pdf_folder(self):
+        folder = PDF_DIR
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(folder)  # type: ignore
+            elif sys.platform == "darwin":
+                os.system(f"open '{folder}'")
+            else:
+                os.system(f"xdg-open '{folder}'")
+        except Exception as e:
+            messagebox.showerror("Error", f"Unable to open folder:\n{e}")
+
     def edit_selected(self):
-        sel = self.tree.focus()
-        if not sel:
+        values = self._selected_voucher()
+        if not values:
             messagebox.showerror("Error", "Select a record first."); return
 
-        values = self.tree.item(sel)["values"]
-        if not values: return
         voucher_id = values[0]
 
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
         cur.execute("""
             SELECT voucher_id, created_at, customer_name, contact_number, units,
-                   particulars, problem, staff_name, status, recipient, remark
+                   particulars, problem, staff_name, status, recipient, remark, pdf_path
             FROM vouchers WHERE voucher_id = ?
         """, (voucher_id,))
         row = cur.fetchone()
         conn.close()
         if not row: return
 
-        _, created_at, customer_name, contact_number, units, particulars, problem, staff_name, status, recipient, remark = row
+        _, created_at, customer_name, contact_number, units, particulars, problem, staff_name, status, recipient, remark, old_pdf_path = row
 
         top = ctk.CTkToplevel(self)
         top.title(f"Edit Voucher {voucher_id}")
-        top.geometry("880x720")
+        top.geometry("900x740")
         top.grab_set()
 
         frm = ctk.CTkFrame(top)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
+        frm.grid_columnconfigure(1, weight=1)
 
-        WIDE = 520
+        WIDE = 540
         r = 0
         ctk.CTkLabel(frm, text="Customer Name").grid(row=r, column=0, sticky="w")
         e_name = ctk.CTkEntry(frm, width=WIDE); e_name.insert(0, customer_name)
-        e_name.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+        e_name.grid(row=r, column=1, sticky="ew", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="Contact Number").grid(row=r, column=0, sticky="w")
         e_contact = ctk.CTkEntry(frm, width=WIDE); e_contact.insert(0, contact_number)
-        e_contact.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+        e_contact.grid(row=r, column=1, sticky="ew", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="No. of Units").grid(row=r, column=0, sticky="w")
         e_units = ctk.CTkEntry(frm, width=120); e_units.insert(0, str(units))
         e_units.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
+        def mk_text(parent, width, height):
+            wrap = ctk.CTkFrame(parent)
+            wrap.grid_columnconfigure(0, weight=1)
+            txt = tk.Text(wrap, width=width, height=height)
+            sb  = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview)
+            txt.configure(yscrollcommand=sb.set)
+            txt.grid(row=0, column=0, sticky="nsew")
+            sb.grid(row=0, column=1, sticky="ns")
+            return wrap, txt
+
         ctk.CTkLabel(frm, text="Particulars").grid(row=r, column=0, sticky="w")
-        t_part = tk.Text(frm, width=66, height=5); t_part.insert("1.0", particulars or "")
-        t_part.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+        part_wrap, t_part = mk_text(frm, width=66, height=6); t_part.insert("1.0", particulars or "")
+        part_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="Problem").grid(row=r, column=0, sticky="w")
-        t_prob = tk.Text(frm, width=66, height=4); t_prob.insert("1.0", problem or "")
-        t_prob.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+        prob_wrap, t_prob = mk_text(frm, width=66, height=5); t_prob.insert("1.0", problem or "")
+        prob_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="Recipient").grid(row=r, column=0, sticky="w")
         staff_values = list_staffs() or [""]
@@ -828,16 +930,18 @@ class VoucherApp(ctk.CTk):
         e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
 
         ctk.CTkLabel(frm, text="Remark").grid(row=r, column=0, sticky="w")
-        t_remark = tk.Text(frm, width=66, height=3); t_remark.insert("1.0", remark or "")
-        t_remark.grid(row=r, column=1, sticky="w", padx=10, pady=6); r+=1
+        rem_wrap, t_remark = mk_text(frm, width=66, height=4); t_remark.insert("1.0", remark or "")
+        rem_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6); r+=1
 
         def save_edit():
             name = e_name.get().strip()
             contact = e_contact.get().strip()
             try:
                 units_val = int((e_units.get() or "1").strip())
+                if units_val <= 0:
+                    raise ValueError
             except ValueError:
-                messagebox.showerror("Invalid", "Units must be a number."); return
+                messagebox.showerror("Invalid", "Units must be a positive integer."); return
             particulars_val = t_part.get("1.0","end").strip()
             problem_val     = t_prob.get("1.0","end").strip()
             recipient_val   = e_recipient.get().strip()
@@ -853,7 +957,13 @@ class VoucherApp(ctk.CTk):
                         (name, contact, units_val, particulars_val,
                          problem_val, staff_val, recipient_val, remark_val, voucher_id))
             conn.commit()
-            # regenerate PDF (layout unchanged)
+            # regenerate PDF (remove old first)
+            try:
+                if old_pdf_path and os.path.exists(old_pdf_path):
+                    os.remove(old_pdf_path)
+            except Exception:
+                pass
+
             pdf_path = generate_pdf(
                 str(voucher_id), name, contact, units_val,
                 particulars_val, problem_val, staff_val, status, created_at, recipient_val
@@ -872,7 +982,7 @@ class VoucherApp(ctk.CTk):
     def modify_base_vid_ui(self):
         top = ctk.CTkToplevel(self)
         top.title("Modify Base Voucher ID")
-        top.geometry("420x200")
+        top.geometry("420x220")
         top.grab_set()
 
         frm = ctk.CTkFrame(top); frm.pack(fill="both", expand=True, padx=16, pady=16)
@@ -881,7 +991,7 @@ class VoucherApp(ctk.CTk):
         ctk.CTkLabel(frm, text=f"Current Base VID: {current_base}", anchor="w").pack(fill="x", pady=(0,8))
         entry = ctk.CTkEntry(frm, placeholder_text="Enter new base voucher ID (integer)")
         entry.pack(fill="x"); entry.insert(0, str(current_base))
-        info = ctk.CTkLabel(frm, text="Existing vouchers will shift by the difference. PDFs will be regenerated.", justify="left")
+        info = ctk.CTkLabel(frm, text="Existing vouchers will shift by the difference. PDFs will be regenerated.", justify="left", wraplength=360)
         info.pack(fill="x", pady=8)
 
         def apply():
@@ -899,6 +1009,66 @@ class VoucherApp(ctk.CTk):
         btns = ctk.CTkFrame(frm); btns.pack(fill="x", pady=(8,0))
         ctk.CTkButton(btns, text="Apply", command=apply, width=120).pack(side="right", padx=4)
         ctk.CTkButton(btns, text="Cancel", command=top.destroy, width=100).pack(side="right", padx=4)
+
+    # ---- Export helpers ----
+    def _rows_for_export(self):
+        filters = self._get_filters()
+        rows = search_vouchers(filters)
+        # Convert to list of dicts for exporting
+        export_rows = []
+        for (vid, created_at, customer, contact, units, recipient, status, remark, pdf) in rows:
+            export_rows.append({
+                "VoucherID": vid,
+                "CreatedAt": created_at,
+                "Customer": customer,
+                "Contact": contact,
+                "Units": units,
+                "Recipient": recipient or "",
+                "Status": status,
+                "Remark": remark or "",
+                "PDFPath": pdf or "",
+            })
+        return export_rows
+
+    def export_csv(self):
+        rows = self._rows_for_export()
+        if not rows:
+            messagebox.showinfo("Export", "No rows to export."); return
+        path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                            filetypes=[("CSV", "*.csv")],
+                                            title="Save CSV")
+        if not path:
+            return
+        try:
+            # CSV without pandas to keep deps minimal
+            import csv
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+            messagebox.showinfo("Export", f"CSV exported:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export CSV:\n{e}")
+
+    def export_excel(self):
+        if not _HAS_PANDAS:
+            messagebox.showerror("Excel Export", "Excel export requires 'pandas' and 'openpyxl'.\nInstall: pip install pandas openpyxl")
+            return
+        rows = self._rows_for_export()
+        if not rows:
+            messagebox.showinfo("Export", "No rows to export."); return
+        path = filedialog.asksaveasfilename(defaultextension=".xlsx",
+                                            filetypes=[("Excel Workbook", "*.xlsx")],
+                                            title="Save Excel")
+        if not path:
+            return
+        try:
+            df = pd.DataFrame(rows)
+            # Use engine=openpyxl explicitly to ensure correct format/extension
+            df.to_excel(path, index=False, engine="openpyxl")
+            messagebox.showinfo("Export", f"Excel exported:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export Excel:\n{e}")
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
