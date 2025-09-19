@@ -19,6 +19,9 @@ jobs:
           # PyInstaller is currently most stable on 3.11
           python-version: "3.11"
 
+      - name: Ensure build base
+        run: python -m pip install --upgrade pip setuptools wheel
+      
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
