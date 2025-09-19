@@ -25,6 +25,14 @@ try:
 except Exception:
     _HAS_PANDAS = False
 
+def get_conn():
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("PRAGMA foreign_keys = ON")
+    # optional but recommended for desktop apps:
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    return conn
+
 # ---------- Wrapped text helpers for PDF ----------
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
@@ -176,7 +184,7 @@ def _verify_pwd(pwd:str, hp:bytes) -> bool:
         return False
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     cur = conn.cursor()
     cur.executescript(BASE_SCHEMA)
 
@@ -192,6 +200,11 @@ def init_db():
     except Exception:
         pass
 
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_created  ON vouchers(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_status   ON vouchers(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_name     ON vouchers(customer_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_comm_staff        ON commissions(staff_id)")
+    
     # ensure new tech columns exist
     for col, typ in [("technician_id","TEXT"), ("technician_name","TEXT")]:
         if not _column_exists(cur, "vouchers", col):
@@ -211,16 +224,15 @@ def init_db():
     cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
     if cur.fetchone()[0] == 0:
         cur.execute(
-            "INSERT INTO users (username, role, password_hash, created_at, updated_at) VALUES (?,?,?,?,?)",
-            ("tonycom", "admin", _hash_pwd("1234567890!@#$%^&*()"),
+            "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            ("tonycom", "admin", _hash_pwd("1234567890!@#$%^&*()"), 1,
              datetime.now().isoformat(sep=" ", timespec="seconds"),
              datetime.now().isoformat(sep=" ", timespec="seconds"))
         )
-
     conn.commit(); conn.close()
 
 def _read_base_vid():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT value FROM settings WHERE key='base_vid'")
     row = cur.fetchone()
@@ -228,7 +240,7 @@ def _read_base_vid():
     return int(row[0]) if row and row[0] else DEFAULT_BASE_VID
 
 def next_voucher_id():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT MAX(CAST(voucher_id AS INTEGER)) FROM vouchers")
     row = cur.fetchone()
@@ -242,7 +254,7 @@ def next_voucher_id():
 
 # ---- Recipient ops (simple list) ----
 def list_staffs_names():
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT name FROM staffs ORDER BY name COLLATE NOCASE ASC")
     rows = [r[0] for r in cur.fetchall()]
     conn.close(); return rows
@@ -250,7 +262,7 @@ def list_staffs_names():
 def add_staff_simple(name: str):
     name = (name or "").strip()
     if not name: return False
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("""INSERT OR IGNORE INTO staffs
                        (position, staff_id_opt, name, phone, photo_path, created_at, updated_at)
@@ -263,7 +275,7 @@ def add_staff_simple(name: str):
     return True
 
 def delete_staff_simple(name: str):
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cur.execute("DELETE FROM staffs WHERE name = ?", (name,))
     conn.commit(); conn.close()
 
@@ -342,7 +354,7 @@ def _draw_main_table(c, left, right, top_table, customer_name, particulars, unit
     return bottom_table, left_col_w
 
 def _draw_policies_and_signatures(c, left, right, bottom_table, left_col_w, recipient, voucher_id, customer_name, contact_number, date_str):
-    ack_text = ("WE HEREBY CONFIRMED THAT THE MACHINE WAS SERVICE AND "
+    ack_text = ("WE HEREBY CONFIRM THAT THE MACHINE WAS SERVICED AND "
                 "REPAIRED SATISFACTORILY")
     ack_left   = left + left_col_w + 10*mm
     ack_right  = right - 6*mm
@@ -417,7 +429,7 @@ def generate_pdf(voucher_id, customer_name, contact_number, units,
 
 # ------------------ DB ops (vouchers) ------------------
 def add_voucher(customer_name, contact_number, units, particulars, problem, staff_name, recipient="", solution="", technician_id="", technician_name=""):
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
 
     voucher_id = next_voucher_id()
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -438,7 +450,7 @@ def add_voucher(customer_name, contact_number, units, particulars, problem, staf
 
 def update_voucher_fields(voucher_id, **fields):
     if not fields: return
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cols, params = [], []
     for k, v in fields.items():
         cols.append(f"{k}=?"); params.append(v)
@@ -448,7 +460,7 @@ def update_voucher_fields(voucher_id, **fields):
 
 def bulk_update_status(voucher_ids, new_status):
     if not voucher_ids: return
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cur.executemany("UPDATE vouchers SET status=? WHERE voucher_id=?", [(new_status, vid) for vid in voucher_ids])
     conn.commit(); conn.close()
 
@@ -472,7 +484,7 @@ def _build_search_sql(filters):
     return sql, params
 
 def search_vouchers(filters):
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     sql, params = _build_search_sql(filters)
     cur.execute(sql, params)
     rows = cur.fetchall()
@@ -480,47 +492,60 @@ def search_vouchers(filters):
     return rows
 
 def modify_base_vid(new_base: int):
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
-    cur.execute("SELECT MIN(CAST(voucher_id AS INTEGER)) FROM vouchers")
-    row = cur.fetchone()
-    if not row or row[0] is None:
-        _set_setting(cur, "base_vid", new_base); conn.commit(); conn.close(); return 0
-    current_min = int(row[0]); delta = int(new_base) - current_min
-    if delta == 0:
-        _set_setting(cur, "base_vid", new_base); conn.commit(); conn.close(); return 0
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur.execute("SELECT MIN(CAST(voucher_id AS INTEGER)) FROM vouchers")
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            _set_setting(cur, "base_vid", new_base)
+            conn.commit(); return 0
 
-    order = "DESC" if delta > 0 else "ASC"
-    cur.execute(f"""
-        SELECT voucher_id, created_at, customer_name, contact_number, units,
-               particulars, problem, staff_name, status, recipient, solution, pdf_path,
-               technician_id, technician_name
-        FROM vouchers
-        ORDER BY CAST(voucher_id AS INTEGER) {order}
-    """)
-    rows = cur.fetchall()
+        current_min = int(row[0]); delta = int(new_base) - current_min
+        if delta == 0:
+            _set_setting(cur, "base_vid", new_base)
+            conn.commit(); return 0
 
-    for (vid, created_at, customer_name, contact_number, units, particulars, problem, staff_name, status, recipient, solution, old_pdf, tech_id, tech_name) in rows:
-        old_id = int(vid); new_id = old_id + delta
-        try:
-            if old_pdf and os.path.exists(old_pdf): os.remove(old_pdf)
-        except Exception: pass
-        cur.execute("UPDATE vouchers SET voucher_id=? WHERE voucher_id=?", (str(new_id), str(old_id)))
-        new_pdf = generate_pdf(str(new_id), customer_name, contact_number, int(units or 1),
-                               particulars, problem, staff_name, status, created_at, recipient)
-        cur.execute("UPDATE vouchers SET pdf_path=? WHERE voucher_id=?", (new_pdf, str(new_id)))
+        order = "DESC" if delta > 0 else "ASC"
+        cur.execute(f"""
+            SELECT voucher_id, created_at, customer_name, contact_number, units,
+                   particulars, problem, staff_name, status, recipient, solution, pdf_path,
+                   technician_id, technician_name
+            FROM vouchers
+            ORDER BY CAST(voucher_id AS INTEGER) {order}
+        """)
+        rows = cur.fetchall()
 
-    _set_setting(cur, "base_vid", new_base)
-    conn.commit(); conn.close()
-    return delta
+        for (vid, created_at, customer_name, contact_number, units, particulars, problem,
+             staff_name, status, recipient, solution, old_pdf, tech_id, tech_name) in rows:
+            old_id = int(vid); new_id = old_id + delta
+            try:
+                if old_pdf and os.path.exists(old_pdf):
+                    os.remove(old_pdf)
+            except Exception:
+                pass
+            cur.execute("UPDATE vouchers SET voucher_id=? WHERE voucher_id=?", (str(new_id), str(old_id)))
+            new_pdf = generate_pdf(str(new_id), customer_name, contact_number, int(units or 1),
+                                   particulars, problem, staff_name, status, created_at, recipient)
+            cur.execute("UPDATE vouchers SET pdf_path=? WHERE voucher_id=?", (new_pdf, str(new_id)))
+
+        _set_setting(cur, "base_vid", new_base)
+        conn.commit(); return delta
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 
 # ------------------ Users (auth & admin) ------------------
 def get_user_by_username(u):
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT id, username, role, password_hash, is_active, must_change_pwd FROM users WHERE username=?", (u,))
     row = cur.fetchone(); conn.close(); return row
 
 def list_users():
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT id, username, role, is_active, must_change_pwd FROM users ORDER BY role, username")
     rows = cur.fetchall(); conn.close(); return rows
 
@@ -528,11 +553,11 @@ def create_user(username, role, password):
     if role not in ("supervisor","user","admin"): raise ValueError("Invalid role")
     # enforce single admin
     if role == "admin":
-        conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+        conn = get_conn(); cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'"); n = cur.fetchone()[0]
         conn.close()
         if n >= 1: raise ValueError("Only one admin allowed")
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cur.execute("""INSERT INTO users (username, role, password_hash, created_at, updated_at)
                    VALUES (?,?,?,?,?)""",
                 (username, role, _hash_pwd(password),
@@ -543,11 +568,11 @@ def create_user(username, role, password):
 def update_user(user_id, **fields):
     if not fields: return
     if "role" in fields and fields["role"] == "admin":
-        conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+        conn = get_conn(); cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND id<>?", (user_id,)); n = cur.fetchone()[0]
         conn.close()
         if n >= 1: raise ValueError("Only one admin allowed")
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cols, params = [], []
     for k, v in fields.items():
         cols.append(f"{k}=?"); params.append(v)
@@ -556,13 +581,13 @@ def update_user(user_id, **fields):
     conn.commit(); conn.close()
 
 def reset_password(user_id, new_pwd):
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cur.execute("UPDATE users SET password_hash=?, must_change_pwd=1, updated_at=? WHERE id=?",
                 (_hash_pwd(new_pwd), datetime.now().isoformat(sep=" ", timespec="seconds"), user_id))
     conn.commit(); conn.close()
 
 def delete_user(user_id):
-    conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+    conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT role FROM users WHERE id=?", (user_id,))
     row = cur.fetchone()
     if row and row[0] == "admin":
@@ -627,9 +652,21 @@ class LoginDialog(ctk.CTkToplevel):
         if not _verify_pwd(p, pwdhash):
             messagebox.showerror("Login", "Invalid credentials.")
             return
+
+        # If must change, force update before proceeding
+        if must_change:
+            new1 = simpledialog.askstring("Change Password", "Enter new password:", show="•")
+            new2 = simpledialog.askstring("Change Password", "Confirm new password:", show="•")
+            if not new1 or new1 != new2:
+                messagebox.showerror("Change Password", "Passwords do not match.")
+                return
+            conn = get_conn(); cur = conn.cursor()
+            cur.execute("UPDATE users SET password_hash=?, must_change_pwd=0, updated_at=? WHERE id=?",
+                        (_hash_pwd(new1), datetime.now().isoformat(sep=" ", timespec="seconds"), uid))
+            conn.commit(); conn.close()
+            
         self.result = {"id": uid, "username": username, "role": role}
         self.destroy()
-
 
 # ---------- Helpers for CTk buttons (white, black outline) ----------
 def white_btn(parent, **kwargs):
@@ -655,11 +692,14 @@ class VoucherApp(ctk.CTk):
         # Global font size to 14
         try:
             import tkinter.font as tkfont
-            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkTooltipFont"):
-                f = tkfont.nametofont(name)
-                f.configure(size=UI_FONT_SIZE)
+            for name in ("TkDefaultFont","TkTextFont","TkMenuFont","TkHeadingFont","TkTooltipFont"):
+                try:
+                    tkfont.nametofont(name).configure(size=UI_FONT_SIZE)
+                except Exception:
+                    pass
         except Exception:
             pass
+
 
         # Login
         self.current_user = None
@@ -949,7 +989,7 @@ class VoucherApp(ctk.CTk):
             return
         vid = str(self.tree.item(sels[0])["values"][0])
 
-        conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+        conn = get_conn(); cur = conn.cursor()
         cur.execute("""SELECT voucher_id, created_at, customer_name, contact_number, units,
                               particulars, problem, staff_name, status, recipient, solution, pdf_path
                        FROM vouchers WHERE voucher_id=?""", (vid,))
@@ -1070,7 +1110,7 @@ class VoucherApp(ctk.CTk):
             return
         voucher_id = self.tree.item(sels[0])["values"][0]
 
-        conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+        conn = get_conn(); cur = conn.cursor()
         cur.execute("""SELECT voucher_id, created_at, customer_name, contact_number, units,
                               particulars, problem, staff_name, status, recipient, solution,
                               technician_id, technician_name
@@ -1161,7 +1201,7 @@ class VoucherApp(ctk.CTk):
                                   solution=solution_val, technician_id=tech_id_val,
                                   technician_name=tech_name_val)
             # regen PDF for consistency
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("SELECT created_at, status, pdf_path FROM vouchers WHERE voucher_id=?", (voucher_id,))
             created_at, status, old_pdf_path = cur.fetchone()
             try:
@@ -1416,7 +1456,7 @@ class VoucherApp(ctk.CTk):
         if not sel: return
         vals = tree.item(sel[0])["values"]
         uid, username = vals[0], vals[1]
-        new = tk.simpledialog.askstring("Reset Password", f"Enter new password for {username}:", show="•")
+        new = simpledialog.askstring("Reset Password", f"Enter new password for {username}:", show="•")
         if not new: return
         try:
             reset_password(uid, new)
@@ -1503,7 +1543,7 @@ class VoucherApp(ctk.CTk):
                 except Exception as e:
                     messagebox.showerror("Photo", f"Failed to process photo: {e}")
                     photo_path = ""
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("""INSERT INTO staffs (position, staff_id_opt, name, phone, photo_path, created_at, updated_at)
                            VALUES (?,?,?,?,?,?,?)""",
                         (pos, sid, name, phone, photo_path,
@@ -1527,7 +1567,7 @@ class VoucherApp(ctk.CTk):
 
         def refresh():
             tree.delete(*tree.get_children())
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("SELECT id, position, staff_id_opt, name, phone, photo_path FROM staffs ORDER BY name")
             for r in cur.fetchall():
                 tree.insert("", "end", values=r)
@@ -1539,7 +1579,7 @@ class VoucherApp(ctk.CTk):
             if not sel: return
             sid = tree.item(sel[0])["values"][0]
             if not messagebox.askyesno("Delete", "Delete selected staff?"): return
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("DELETE FROM staffs WHERE id=?", (sid,))
             conn.commit(); conn.close()
             refresh()
@@ -1552,7 +1592,7 @@ class VoucherApp(ctk.CTk):
         frm.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(frm, text="Staff").grid(row=0, column=0, sticky="w")
-        conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+        conn = get_conn(); cur = conn.cursor()
         cur.execute("SELECT id, name FROM staffs ORDER BY name"); staff_rows = cur.fetchall(); conn.close()
         staff_names = [f"{i}:{n}" for (i,n) in staff_rows] or [""]
         cb_staff = ctk.CTkComboBox(frm, values=staff_names, width=320); 
@@ -1611,7 +1651,7 @@ class VoucherApp(ctk.CTk):
                 except Exception as e:
                     messagebox.showerror("Bill Image", f"Failed to process image: {e}")
                     img_path = ""
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("""INSERT INTO commissions (staff_id, bill_type, bill_no, total_amount, commission_amount, bill_image_path, created_at, updated_at)
                            VALUES (?,?,?,?,?,?,?,?)""",
                         (staff_id, bill_type, bill_no, total, commission, img_path,
@@ -1654,7 +1694,7 @@ class VoucherApp(ctk.CTk):
         def refresh():
             q = (e_search.get() or "").strip().lower()
             tree.delete(*tree.get_children())
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("""SELECT c.id, s.name, c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.bill_image_path, c.created_at
                            FROM commissions c JOIN staffs s ON c.staff_id=s.id
                            ORDER BY c.id DESC""")
@@ -1672,7 +1712,7 @@ class VoucherApp(ctk.CTk):
             rid = tree.item(sel[0])["values"][0]
 
             # Load record
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("""SELECT staff_id, bill_type, bill_no, total_amount, commission_amount, bill_image_path
                            FROM commissions WHERE id=?""", (rid,))
             row = cur.fetchone(); conn.close()
@@ -1690,7 +1730,7 @@ class VoucherApp(ctk.CTk):
             f.grid_columnconfigure(1, weight=1)
 
             # Staff list
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("SELECT id, name FROM staffs ORDER BY name")
             staff_rows = cur.fetchall(); conn.close()
             staff_names = [f"{i}:{n}" for (i, n) in staff_rows] or [""]
@@ -1764,7 +1804,7 @@ class VoucherApp(ctk.CTk):
                         messagebox.showerror("Bill Image", f"Failed to process image: {e}")
                         img_path_new = bill_image_path
 
-                conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+                conn = get_conn(); cur = conn.cursor()
                 cur.execute("""UPDATE commissions SET staff_id=?, bill_type=?, bill_no=?, total_amount=?, commission_amount=?, bill_image_path=?, updated_at=?
                                WHERE id=?""",
                             (staff_id_new, bill_type_new, bill_no_new, total, commission, img_path_new,
@@ -1780,7 +1820,7 @@ class VoucherApp(ctk.CTk):
             if not sel: return
             rid = tree.item(sel[0])["values"][0]
             if not messagebox.askyesno("Delete", "Delete this commission record? This cannot be undone."): return
-            conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
+            conn = get_conn(); cur = conn.cursor()
             cur.execute("DELETE FROM commissions WHERE id=?", (rid,))
             conn.commit(); conn.close()
             refresh()
