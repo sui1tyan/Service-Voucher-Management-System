@@ -225,7 +225,7 @@ def init_db():
     if cur.fetchone()[0] == 0:
         cur.execute(
             "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-            ("tonycom", "admin", _hash_pwd("1234567890!@#$%^&*()"), 1,
+            ("tonycom", "admin", _hash_pwd("1234567890!@#$%^&*()"), 0,
              datetime.now().isoformat(sep=" ", timespec="seconds"),
              datetime.now().isoformat(sep=" ", timespec="seconds"))
         )
