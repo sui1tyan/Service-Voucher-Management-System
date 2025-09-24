@@ -1343,23 +1343,19 @@ class VoucherApp(ctk.CTk):
 
     # ---------- Staff Profile UI (preview + folder open) ----------
     def staff_profile(self):
-        # ---- fixed-size, no-blank layout ----
         top = ctk.CTkToplevel(self)
         top.title("Staff Profile")
         top.geometry("900x640")
-        top.resizable(False, False)  # constant-size window
+        top.resizable(False, False)
         top.grab_set()
 
-        # One root frame that fills the whole window (no XY scroller here)
         frm = ctk.CTkFrame(top)
         frm.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Make all columns share width and let row 5 (the table) take remaining height
         for c in range(4):
             frm.grid_columnconfigure(c, weight=1)
         frm.grid_rowconfigure(5, weight=1)
 
-        # ---- top fields ----
         ctk.CTkLabel(frm, text="Position").grid(row=0, column=0, sticky="w")
         roles = ["Salesman","Technician","Boss"]
         cb_pos = ctk.CTkComboBox(frm, values=roles, width=200); cb_pos.set("Technician")
@@ -1374,24 +1370,21 @@ class VoucherApp(ctk.CTk):
         ctk.CTkLabel(frm, text="Contact Number").grid(row=1, column=2, sticky="w")
         e_phone = ctk.CTkEntry(frm); e_phone.grid(row=1, column=3, sticky="ew", padx=8, pady=4)
 
-        # ---- PHOTO PREVIEW (constant size before/after) ----
-        NAME_W = 260          # logical preview width for image
-        IMG_W  = NAME_W
-        IMG_H  = 120
-        PREVIEW_H = 160       # frame height (label + canvas)
-        preview_frame = ctk.CTkFrame(frm, width=NAME_W + 20, height=PREVIEW_H)
+        # ---- PHOTO PREVIEW (constant size) ----
+        IMG_W, IMG_H = 260, 120
+        PREVIEW_H = 160
+        preview_frame = ctk.CTkFrame(frm, width=IMG_W + 20, height=PREVIEW_H)
         preview_frame.grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 6))
-        preview_frame.grid_propagate(False)  # keep the frame compact
+        preview_frame.grid_propagate(False)
 
         ph_label = ctk.CTkLabel(preview_frame, text="No photo selected")
         ph_label.pack(anchor="w", padx=8, pady=6)
-
-        # Use a Canvas so width/height are in pixels and never change
+    
         img_canvas = tk.Canvas(preview_frame, width=IMG_W, height=IMG_H,
                                bd=1, relief="solid", highlightthickness=1)
         img_canvas.pack(padx=8, pady=(0, 8))
 
-        _preview_img_tk = {"im": None}  # keep a ref so Tk doesn't GC the image
+        _preview_img_tk = {"im": None}
 
     def _show_preview(path):
         try:
@@ -1399,8 +1392,7 @@ class VoucherApp(ctk.CTk):
             im = ImageOps.exif_transpose(im)
             im.thumbnail((IMG_W, IMG_H), Image.LANCZOS)
             tkimg = ImageTk.PhotoImage(im)
-            img_canvas.delete("all")  # clear whatever was there
-            # center the image in the fixed canvas
+            img_canvas.delete("all")
             img_canvas.create_image(IMG_W // 2, IMG_H // 2, image=tkimg)
             _preview_img_tk["im"] = tkimg
         except Exception as e:
@@ -1426,7 +1418,7 @@ class VoucherApp(ctk.CTk):
     white_btn(btn_photo_bar, text="Remove Photo", command=remove_photo, width=140)\
         .pack(side="left")
 
-    # ---- Add Staff (unchanged logic; uses fixed preview foldering) ----
+    # ---- Add Staff ----
     def _insert_staff():
         name = e_name.get().strip()
         if not name:
@@ -1457,7 +1449,7 @@ class VoucherApp(ctk.CTk):
     white_btn(frm, text="Add Staff", command=_insert_staff, width=130)\
         .grid(row=4, column=3, sticky="e", pady=6)
 
-    # ---- LIST (fills the rest; no fixed pixel size, no pack) ----
+    # ---- LIST ----
     list_wrap = ctk.CTkFrame(frm)
     list_wrap.grid(row=5, column=0, columnspan=4, sticky="nsew", padx=8, pady=(6, 0))
     list_wrap.grid_rowconfigure(0, weight=1)
@@ -1481,7 +1473,6 @@ class VoucherApp(ctk.CTk):
     tree.configure(yscrollcommand=sb.set)
     freeze_tree_columns(tree)
 
-    # actions under the list
     def refresh():
         tree.delete(*tree.get_children())
         conn = get_conn(); cur = conn.cursor()
@@ -1513,7 +1504,6 @@ class VoucherApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Open Folder", f"Unable to open folder:\n{e}")
 
-    # bottom-right buttons (same row as list, different columns)
     white_btn(frm, text="Open Staff Folder", command=open_staff_folder, width=170)\
         .grid(row=6, column=2, sticky="e", pady=8)
     white_btn(frm, text="Delete Selected", command=delete_sel, width=150)\
