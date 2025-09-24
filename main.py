@@ -38,6 +38,13 @@ def get_conn():
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
+def restart_app():
+    """Restart the current app (PyInstaller EXE or python script) with same args."""
+    if getattr(sys, "frozen", False):  # packaged exe
+        os.execl(sys.executable, sys.executable, *sys.argv[1:])
+    else:  # run as script
+        os.execl(sys.executable, sys.executable, os.path.abspath(__file__), *sys.argv[1:])
+
 # ---------- Wrapped text helpers for PDF ----------
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
@@ -75,7 +82,6 @@ PDF_DIR     = os.path.join(APP_DIR, "pdfs")
 IMAGES_DIR  = os.path.join(APP_DIR, "images")           # legacy images root (kept for backup/restore)
 STAFFS_ROOT = os.path.join(APP_DIR, "staffs")           # NEW: per-staff folders
 os.makedirs(PDF_DIR, exist_ok=True)
-os.makedirs(IMAGES_DIR, exist_ok=True)
 os.makedirs(STAFFS_ROOT, exist_ok=True)
 
 SHOP_NAME = "TONY.COM"
@@ -547,8 +553,8 @@ def _process_square_image(path_in, path_out, max_px=400):
     img.save(path_out, format="JPEG", quality=92)
 
 # ------------------ Commission utilities ------------------
-BILL_RE_CS = re.compile(r"^CS-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\\d{4}$")
-BILL_RE_IV = re.compile(r"^IV-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\\d{4}$")
+BILL_RE_CS = re.compile(r"^CS-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\d{4}$")
+BILL_RE_IV = re.compile(r"^IV-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\d{4}$")
 
 # ------------------ UI ------------------
 FONT_FAMILY = "Segoe UI"
@@ -580,13 +586,13 @@ class LoginDialog(ctk.CTkToplevel):
     def __init__(self, master):
         super().__init__(master)
         self.title("Login")
-        self.geometry("380x220")
+        self.geometry("460x240")
         self.resizable(False, False)
         self.grab_set()
         frm = ctk.CTkFrame(self); frm.pack(fill="both", expand=True, padx=16, pady=16)
-        ctk.CTkLabel(frm, text="Username").grid(row=0, column=0, sticky="w", pady=(0,6))
+        ctk.CTkLabel(frm, text="Username:").grid(row=0, column=0, sticky="w", pady=(0,6))
         self.e_user = ctk.CTkEntry(frm, width=220); self.e_user.grid(row=0, column=1, sticky="w", pady=(0,6))
-        ctk.CTkLabel(frm, text="Password").grid(row=1, column=0, sticky="w", pady=(0,6))
+        ctk.CTkLabel(frm, text="Password:").grid(row=1, column=0, sticky="w", pady=(0,6))
         self.e_pwd = ctk.CTkEntry(frm, width=220, show="•"); self.e_pwd.grid(row=1, column=1, sticky="w", pady=(0,6))
         self.var_show = tk.BooleanVar(value=False)
         chk = ctk.CTkCheckBox(frm, text="Show", variable=self.var_show, command=self._toggle); chk.grid(row=1, column=2, padx=(6,0))
@@ -621,12 +627,24 @@ class LoginDialog(ctk.CTkToplevel):
             if not new1 or new1 != new2:
                 messagebox.showerror("Change Password", "Passwords do not match.")
                 return
+
             conn = get_conn(); cur = conn.cursor()
-            cur.execute("UPDATE users SET password_hash=?, must_change_pwd=0, updated_at=? WHERE id=?",
-                        (_hash_pwd(new1), datetime.now().isoformat(sep=" ", timespec="seconds"), uid))
+            cur.execute(
+                "UPDATE users SET password_hash=?, must_change_pwd=0, updated_at=? WHERE id=?",
+                (_hash_pwd(new1), datetime.now().isoformat(sep=' ', timespec='seconds'), uid)
+            )
             conn.commit(); conn.close()
-        self.result = {"id": uid, "username": username, "role": role}
-        self.destroy()
+
+            # Inform and restart automatically; next login won't prompt again
+            messagebox.showinfo("Password Changed", "Your password has been changed.\nThe application will restart now.")
+            try:
+                # close root Tk before replacing the process to avoid Tk hanging
+                if self.master is not None:
+                    self.master.destroy()
+            except Exception:
+                pass
+            restart_app()
+            return  # ensure no further code runs in this method
 
 def white_btn(parent, **kwargs):
     kwargs.setdefault("fg_color", "white")
@@ -635,6 +653,49 @@ def white_btn(parent, **kwargs):
     kwargs.setdefault("border_width", 1)
     kwargs.setdefault("hover_color", "#F0F0F0")
     return ctk.CTkButton(parent, **kwargs)
+
+def make_xy_scroller(parent):
+    """Return (outer_frame, inner_frame) where inner_frame is scrollable on both axes."""
+    outer = ctk.CTkFrame(parent)
+    # Canvas for scrolling
+    canvas = tk.Canvas(outer, highlightthickness=0)
+    xbar = ttk.Scrollbar(outer, orient="horizontal", command=canvas.xview)
+    ybar = ttk.Scrollbar(outer, orient="vertical",   command=canvas.yview)
+    canvas.configure(xscrollcommand=xbar.set, yscrollcommand=ybar.set)
+
+    # Layout
+    canvas.grid(row=0, column=0, sticky="nsew")
+    ybar.grid(row=0, column=1, sticky="ns")
+    xbar.grid(row=1, column=0, sticky="ew")
+    outer.grid_rowconfigure(0, weight=1)
+    outer.grid_columnconfigure(0, weight=1)
+
+    # The actual content frame goes inside the canvas
+    inner = ctk.CTkFrame(canvas)
+    win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    # Auto-resize scrollregion
+    def _update_scrollregion(_=None):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+    inner.bind("<Configure>", _update_scrollregion)
+
+    # Resize canvas when outer changes
+    def _resize_canvas(event):
+        canvas.configure(width=event.width - ybar.winfo_width(),
+                         height=event.height - xbar.winfo_height())
+        # Keep inner pinned to the left while allowing horizontal scroll
+        canvas.itemconfigure(win, anchor="nw")
+    outer.bind("<Configure>", _resize_canvas)
+
+    # Wheel scrolling
+    def _on_mousewheel(e):
+        if e.state & 0x0001:  # Shift = horizontal
+            canvas.xview_scroll(-1 if e.delta > 0 else 1, "units")
+        else:
+            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+    canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")  # Windows
+
+    return outer, inner
 
 STATUS_VALUES = ["All", "Pending", "Completed", "Deleted", "1st call", "2nd reminder", "3rd reminder"]
 
@@ -1264,8 +1325,10 @@ class VoucherApp(ctk.CTk):
     def staff_profile(self):
         top = ctk.CTkToplevel(self); top.title("Staff Profile"); top.geometry("900x640"); top.grab_set()
 
-        frm = ctk.CTkFrame(top); frm.pack(fill="both", expand=True, padx=10, pady=10)
-        frm.grid_columnconfigure(1, weight=1); frm.grid_rowconfigure(5, weight=1)
+        outer, frm = make_xy_scroller(top)  # new
+        outer.pack(fill="both", expand=True, padx=10, pady=10)
+        frm.grid_columnconfigure(1, weight=1)
+        frm.grid_rowconfigure(5, weight=1)
 
         ctk.CTkLabel(frm, text="Position").grid(row=0, column=0, sticky="w")
         roles = ["Salesman","Technician","Boss"]
@@ -1286,14 +1349,14 @@ class VoucherApp(ctk.CTk):
         preview_frame.grid_columnconfigure(0, weight=1)
         ph_label = ctk.CTkLabel(preview_frame, text="No photo selected"); ph_label.pack(anchor="w", padx=8, pady=6)
         img_container = tk.Label(preview_frame, bd=1, relief="solid"); img_container.pack(padx=8, pady=(0,8), ipadx=4, ipady=4)
-        img_container.configure(width=200, height=200)
+        img_container.configure(width=160, height=160)
         _preview_img_tk = {"im": None}  # keep ref
 
         def _show_preview(path):
             try:
                 im = Image.open(path); im = ImageOps.exif_transpose(im)
                 # fit into 200x200 square
-                im.thumbnail((200,200), Image.LANCZOS)
+                im.thumbnail((160,160), Image.LANCZOS)
                 tkimg = ImageTk.PhotoImage(im)
                 img_container.configure(image=tkimg); _preview_img_tk["im"] = tkimg
             except Exception as e:
@@ -1381,7 +1444,9 @@ class VoucherApp(ctk.CTk):
     # ---------- Commission UI (with preview + per-staff storage) ----------
     def add_commission(self):
         top = ctk.CTkToplevel(self); top.title("Add Commission"); top.geometry("820x620"); top.grab_set()
-        frm = ctk.CTkFrame(top); frm.pack(fill="both", expand=True, padx=10, pady=10)
+        outer, frm = make_xy_scroller(top)  # new
+        outer.pack(fill="both", expand=True, padx=10, pady=10)
+        frm.grid_columnconfigure(1, weight=1)
         frm.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(frm, text="Staff").grid(row=0, column=0, sticky="w")
@@ -1408,12 +1473,12 @@ class VoucherApp(ctk.CTk):
         # Bill image selection + preview
         bill_lbl = ctk.CTkLabel(frm, text="No bill image selected"); bill_lbl.grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(6,2))
         preview = tk.Label(frm, bd=1, relief="solid"); preview.grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0,8))
-        preview.configure(width=220, height=220)
+        preview.configure(width=180, height=180)
         _bill_img_tk = {"im": None}
         def show_bill_preview(path):
             try:
                 im = Image.open(path); im = ImageOps.exif_transpose(im)
-                im.thumbnail((220,220), Image.LANCZOS)
+                im.thumbnail((180,180), Image.LANCZOS)
                 tkimg = ImageTk.PhotoImage(im); preview.configure(image=tkimg); _bill_img_tk["im"] = tkimg
             except Exception as e:
                 bill_lbl.configure(text=f"Preview failed: {e}")
