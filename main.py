@@ -589,6 +589,7 @@ class LoginDialog(ctk.CTkToplevel):
         self.geometry("460x240")
         self.resizable(False, False)
         self.grab_set()
+
         frm = ctk.CTkFrame(self); frm.pack(fill="both", expand=True, padx=16, pady=16)
         ctk.CTkLabel(frm, text="Username:").grid(row=0, column=0, sticky="w", pady=(0,6))
         self.e_user = ctk.CTkEntry(frm, width=220); self.e_user.grid(row=0, column=1, sticky="w", pady=(0,6))
@@ -599,6 +600,10 @@ class LoginDialog(ctk.CTkToplevel):
         btns = ctk.CTkFrame(frm); btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(12,0))
         self.btn_login = ctk.CTkButton(btns, text="Login", command=self._do_login, width=120); self.btn_login.pack(side="right")
         self.result = None
+
+        # optional niceties
+        self.e_user.focus_set()
+        self.bind("<Return>", lambda _e: self._do_login())
 
     def _toggle(self):
         self.e_pwd.configure(show="" if self.var_show.get() else "•")
@@ -627,28 +632,28 @@ class LoginDialog(ctk.CTkToplevel):
             if not new1 or new1 != new2:
                 messagebox.showerror("Change Password", "Passwords do not match.")
                 return
-
             conn = get_conn(); cur = conn.cursor()
             cur.execute(
                 "UPDATE users SET password_hash=?, must_change_pwd=0, updated_at=? WHERE id=?",
                 (_hash_pwd(new1), datetime.now().isoformat(sep=' ', timespec='seconds'), uid)
             )
             conn.commit(); conn.close()
-
-            # Inform and restart automatically; next login won't prompt again
             messagebox.showinfo("Password Changed", "Your password has been changed.\nThe application will restart now.")
+            try: self.grab_release()
+            except Exception: pass
             try:
-                # close root Tk before replacing the process to avoid Tk hanging
-                if self.master is not None:
-                    self.master.destroy()
-            except Exception:
-                pass
-            try:
-                self.destroy()
-            except Exception:
-                pass
+                if self.master is not None: self.master.destroy()
+            except Exception: pass
+            try: self.destroy()
+            except Exception: pass
             restart_app()
-            return  # ensure no further code runs in this method
+            return
+
+        # ✅ SUCCESS PATH (no password change required)
+        self.result = {"id": uid, "username": username, "role": role}
+        try: self.grab_release()
+        except Exception: pass
+        self.destroy()
 
 def white_btn(parent, **kwargs):
     kwargs.setdefault("fg_color", "white")
