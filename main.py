@@ -528,8 +528,10 @@ def update_user(user_id, **fields):
 
 def reset_password(user_id, new_pwd):
     conn = get_conn(); cur = conn.cursor()
-    cur.execute("UPDATE users SET password_hash=?, must_change_pwd=1, updated_at=? WHERE id=?",
-                (_hash_pwd(new_pwd), datetime.now().isoformat(sep=" ", timespec="seconds"), user_id))
+    cur.execute(
+        "UPDATE users SET password_hash=?, must_change_pwd=0, updated_at=? WHERE id=?",
+        (_hash_pwd(new_pwd), datetime.now().isoformat(sep=" ", timespec="seconds"), user_id)
+    )
     conn.commit(); conn.close()
 
 def delete_user(user_id):
@@ -627,17 +629,13 @@ class LoginDialog(ctk.CTkToplevel):
             return
 
         if must_change:
-            new1 = simpledialog.askstring("Change Password", "Enter new password:", show="•")
-            new2 = simpledialog.askstring("Change Password", "Confirm new password:", show="•")
-            if not new1 or new1 != new2:
-                messagebox.showerror("Change Password", "Passwords do not match.")
-                return
             conn = get_conn(); cur = conn.cursor()
             cur.execute(
-                "UPDATE users SET password_hash=?, must_change_pwd=0, updated_at=? WHERE id=?",
-                (_hash_pwd(new1), datetime.now().isoformat(sep=' ', timespec='seconds'), uid)
+                "UPDATE users SET must_change_pwd=0, updated_at=? WHERE id=?",
+                (datetime.now().isoformat(sep=' ', timespec='seconds'), uid)
             )
             conn.commit(); conn.close()
+            # fall through to normal success path (no restart, no dialogs)
             messagebox.showinfo("Password Changed", "Your password has been changed.\nThe application will restart now.")
             try: self.grab_release()
             except Exception: pass
@@ -1305,7 +1303,7 @@ class VoucherApp(ctk.CTk):
         new = simpledialog.askstring("Reset Password", f"Enter new password for {username}:", show="•")
         if not new: return
         try:
-            reset_password(uid, new); self._refresh_users(tree); messagebox.showinfo("User", "Password reset; user must change on next login.")
+            reset_password(uid, new); self._refresh_users(tree); messagebox.showinfo("User", "Password reset success!")
         except Exception as e:
             messagebox.showerror("User", f"Failed: {e}")
 
