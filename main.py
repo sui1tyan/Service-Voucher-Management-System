@@ -986,7 +986,7 @@ class VoucherApp(ctk.CTk):
 
         for col, text, w in [
             ("VoucherID", "VoucherID", 100),
-            ("Date", "Date", 170),
+            ("Date", "Date", 220),
             ("Customer", "Customer", 220),
             ("Contact", "Contact", 160),
             ("Units", "Units", 70),
@@ -2016,77 +2016,92 @@ class VoucherApp(ctk.CTk):
     def add_commission(self):
         top = ctk.CTkToplevel(self)
         top.title("Add Commission")
-        top.geometry("820x620")
+        top.geometry("900x640")
+        top.resizable(False, False)
         top.grab_set()
 
-        outer, frm = make_xy_scroller(top)
-        outer.pack(fill="both", expand=True, padx=10, pady=10)
-        frm.grid_columnconfigure(1, weight=1)
+        frm = ctk.CTkFrame(top)
+        frm.pack(fill="both", expand=True, padx=10, pady=10)
 
+        # grid similar to staff UI
+        for c in range(4):
+            frm.grid_columnconfigure(c, weight=1)
+
+        # --- Fields (top rows) ---
         ctk.CTkLabel(frm, text="Staff").grid(row=0, column=0, sticky="w")
-        conn = get_conn()
-        cur = conn.cursor()
+        conn = get_conn(); cur = conn.cursor()
         cur.execute("SELECT id, name FROM staffs ORDER BY name")
-        staff_rows = cur.fetchall()
-        conn.close()
-        staff_names = [f"{i}:{n}" for (i, n) in staff_rows]
-        staff_values = (["— Select —"] + staff_names) if staff_names else ["— Select —"]
+        staff_rows = cur.fetchall(); conn.close()
+        staff_values = ["— Select —"] + [f"{i}:{n}" for (i, n) in staff_rows] if staff_rows else ["— Select —"]
         cb_staff = ctk.CTkComboBox(frm, values=staff_values, width=320)
         cb_staff.set(staff_values[0])
         cb_staff.grid(row=0, column=1, sticky="w", padx=8, pady=6)
-
-        ctk.CTkLabel(frm, text="Bill Type").grid(row=1, column=0, sticky="w")
+    
+        ctk.CTkLabel(frm, text="Bill Type").grid(row=0, column=2, sticky="w")
         cb_type = ctk.CTkComboBox(frm, values=["Cash Bill", "Invoice Bill"], width=200)
         cb_type.set("Cash Bill")
-        cb_type.grid(row=1, column=1, sticky="w", padx=8, pady=6)
-
-        ctk.CTkLabel(frm, text="Bill No.").grid(row=2, column=0, sticky="w")
-        e_bill = ctk.CTkEntry(frm, width=260)
-        e_bill.grid(row=2, column=1, sticky="w", padx=8, pady=6)
-
-        ctk.CTkLabel(frm, text="Total Amount").grid(row=3, column=0, sticky="w")
-        e_total = ctk.CTkEntry(frm, width=200)
-        e_total.grid(row=3, column=1, sticky="w", padx=8, pady=6)
-
-        ctk.CTkLabel(frm, text="Commission Amount").grid(row=4, column=0, sticky="w")
-        e_comm = ctk.CTkEntry(frm, width=200)
-        e_comm.grid(row=4, column=1, sticky="w", padx=8, pady=6)
-
-        bill_lbl = ctk.CTkLabel(frm, text="No bill image selected")
-        bill_lbl.grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
-
-        preview = tk.Label(frm, bd=1, relief="solid")
-        preview.grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
-        preview.configure(width=180, height=140)
+        cb_type.grid(row=0, column=3, sticky="w", padx=8, pady=6)
+    
+        ctk.CTkLabel(frm, text="Bill No.").grid(row=1, column=0, sticky="w")
+        e_bill = ctk.CTkEntry(frm)
+        e_bill.grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+    
+        ctk.CTkLabel(frm, text="Total Amount").grid(row=1, column=2, sticky="w")
+        e_total = ctk.CTkEntry(frm)
+        e_total.grid(row=1, column=3, sticky="ew", padx=8, pady=6)
+    
+        ctk.CTkLabel(frm, text="Commission Amount").grid(row=2, column=0, sticky="w")
+        e_comm = ctk.CTkEntry(frm)
+        e_comm.grid(row=2, column=1, sticky="ew", padx=8, pady=6)
+    
+        # --- Compact image preview block (like Staff UI) ---
+        IMG_W, IMG_H = 200, 120
+        PREVIEW_H = 160
+    
+        preview_frame = ctk.CTkFrame(frm, width=IMG_W + 20, height=PREVIEW_H)
+        preview_frame.grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 6))
+        preview_frame.grid_propagate(False)
+    
+        bill_lbl = ctk.CTkLabel(preview_frame, text="No bill image selected")
+        bill_lbl.pack(anchor="w", padx=8, pady=6)
+    
+        img_canvas = tk.Canvas(preview_frame, width=IMG_W, height=IMG_H, bd=1,
+                               relief="solid", highlightthickness=1)
+        img_canvas.pack(padx=8, pady=(0, 8))
+    
         _bill_img_tk = {"im": None}
-
-        def show_bill_preview(path):
+    
+        def _show_preview(path):
             try:
                 im = Image.open(path)
                 im = ImageOps.exif_transpose(im)
-                im.thumbnail((180, 140), Image.LANCZOS)
+                im.thumbnail((IMG_W, IMG_H), Image.LANCZOS)
                 tkimg = ImageTk.PhotoImage(im)
-                preview.configure(image=tkimg)
+                img_canvas.delete("all")
+                img_canvas.create_image(IMG_W // 2, IMG_H // 2, image=tkimg)
                 _bill_img_tk["im"] = tkimg
             except Exception as e:
+                img_canvas.delete("all")
+                _bill_img_tk["im"] = None
                 bill_lbl.configure(text=f"Preview failed: {e}")
-
+    
         def choose_bill():
             p = filedialog.askopenfilename(filetypes=[("Image", "*.jpg;*.jpeg;*.png")])
             if p:
                 bill_lbl.configure(text=p)
-                show_bill_preview(p)
-
+                _show_preview(p)
+    
         def remove_bill():
             bill_lbl.configure(text="No bill image selected")
-            preview.configure(image="")
+            img_canvas.delete("all")
             _bill_img_tk["im"] = None
-
-        btn_bill_bar = ctk.CTkFrame(frm)
-        btn_bill_bar.grid(row=5, column=1, sticky="e", padx=8)
-        white_btn(btn_bill_bar, text="Choose Bill Image", width=160, command=choose_bill).pack(side="left", padx=(0, 8))
-        white_btn(btn_bill_bar, text="Remove Image", width=140, command=remove_bill).pack(side="left")
-
+    
+        btn_photo_bar = ctk.CTkFrame(frm)
+        btn_photo_bar.grid(row=4, column=1, sticky="w", pady=(0, 6), padx=8)
+        white_btn(btn_photo_bar, text="Choose Bill Image", command=choose_bill, width=160).pack(side="left", padx=(0, 8))
+        white_btn(btn_photo_bar, text="Remove Image", command=remove_bill, width=140).pack(side="left")
+    
+        # --- Save logic (unchanged rules) ---
         def validate_bill():
             s = (e_bill.get() or "").strip().upper()
             btype = cb_type.get()
@@ -2096,7 +2111,7 @@ class VoucherApp(ctk.CTk):
                     "Bill No.", "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: IV-MMDD/XXXX"
                 )
             return ok
-
+    
         def save():
             if not staff_rows:
                 messagebox.showerror("Commission", "No staff found. Add staff first.")
@@ -2106,20 +2121,19 @@ class VoucherApp(ctk.CTk):
                 return
             if not validate_bill():
                 return
-            try:
-                total = float(e_total.get())
-                commission = float(e_comm.get())
-            except Exception:
-                messagebox.showerror("Commission", "Amounts must be numeric.")
-                return
 
+            try:
+                total = float(e_total.get()); commission = float(e_comm.get())
+            except Exception:
+                messagebox.showerror("Commission", "Amounts must be numeric."); return
+    
             staff_id = int((cb_staff.get().split(":", 1)[0] or "0"))
             sname = next((n for i, n in staff_rows if i == staff_id), None) or "unknown"
             base_dir, com_dir = staff_dirs_for(sname)
-
+    
             bill_type = "CS" if cb_type.get() == "Cash Bill" else "IV"
             bill_no = (e_bill.get() or "").strip().upper()
-
+    
             img_src = bill_lbl.cget("text")
             img_path = ""
             if img_src and img_src != "No bill image selected":
@@ -2130,7 +2144,7 @@ class VoucherApp(ctk.CTk):
                 except Exception as e:
                     messagebox.showerror("Bill Image", f"Failed to process image: {e}")
                     img_path = ""
-
+    
             conn = get_conn()
             try:
                 cur = conn.cursor()
@@ -2141,34 +2155,24 @@ class VoucherApp(ctk.CTk):
                     VALUES (?,?,?,?,?,?,?,?)
                     """,
                     (
-                        staff_id,
-                        bill_type,
-                        bill_no,
-                        total,
-                        commission,
-                        img_path,
+                        staff_id, bill_type, bill_no, total, commission, img_path,
                         datetime.now().isoformat(sep=" ", timespec="seconds"),
                         datetime.now().isoformat(sep=" ", timespec="seconds"),
                     ),
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
-                # Duplicate (staff_id, bill_type, bill_no) per unique index
                 conn.rollback()
-                # Clean up the just-created image so we don't leave orphans
                 try:
                     if img_path and os.path.exists(img_path):
                         os.remove(img_path)
                 except Exception:
                     pass
-                messagebox.showerror(
-                    "Commission",
-                    f"This bill already exists for {sname}:\nType: {bill_type}, No: {bill_no}"
-                )
+                messagebox.showerror("Commission",
+                                     f"This bill already exists for {sname}:\nType: {bill_type}, No: {bill_no}")
                 return
             except Exception as e:
                 conn.rollback()
-                # Clean up image on any failure
                 try:
                     if img_path and os.path.exists(img_path):
                         os.remove(img_path)
@@ -2178,11 +2182,13 @@ class VoucherApp(ctk.CTk):
                 return
             finally:
                 conn.close()
-
+    
             messagebox.showinfo("Commission", "Saved.")
             top.destroy()
+    
+        # bottom-right Save button (like staff UI)
+        white_btn(frm, text="Save", command=save, width=140).grid(row=5, column=3, sticky="e", pady=8)
 
-        white_btn(frm, text="Save", command=save, width=120).grid(row=7, column=1, sticky="e", pady=10)
 
     def view_commissions(self):
         top = ctk.CTkToplevel(self)
