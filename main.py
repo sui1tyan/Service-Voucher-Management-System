@@ -643,6 +643,10 @@ class LoginDialog(ctk.CTkToplevel):
                     self.master.destroy()
             except Exception:
                 pass
+            try:
+                self.destroy()
+            except Exception:
+                pass
             restart_app()
             return  # ensure no further code runs in this method
 
