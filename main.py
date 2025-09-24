@@ -1275,7 +1275,7 @@ class VoucherApp(ctk.CTk):
         freeze_tree_columns(tree)
 
         actions = ctk.CTkFrame(frm); actions.grid(row=2, column=0, sticky="e", pady=(8,0))
-        white_btn(actions, text="Reset Password", width=140, command=lambda: self._reset_user_password(tree)).pack(side="left", padx=5)
+        white_btn(actions, text="Reset Password", width=140, command=lambda: self._reset_user_password(tree, top)).pack(side="left", padx=5)
         white_btn(actions, text="Toggle Active", width=140, command=lambda: self._toggle_user_active(tree)).pack(side="left", padx=5)
         white_btn(actions, text="Delete User", width=130, command=lambda: self._delete_user(tree)).pack(side="left", padx=5)
 
@@ -1296,16 +1296,29 @@ class VoucherApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("User", f"Failed: {e}")
 
-    def _reset_user_password(self, tree):
+    def _reset_user_password(self, tree, parent=None):
         sel = tree.selection()
-        if not sel: return
-        vals = tree.item(sel[0])["values"]; uid, username = vals[0], vals[1]
-        new = simpledialog.askstring("Reset Password", f"Enter new password for {username}:", show="•")
-        if not new: return
+        if not sel:
+            return
+        uid, username = tree.item(sel[0])["values"][:2]
+
+        # ensure on-top and visible
+        if parent is not None:
+            parent.lift()
+            parent.attributes("-topmost", True)
+            parent.update_idletasks()
         try:
-            reset_password(uid, new); self._refresh_users(tree); messagebox.showinfo("User", "Password reset success!")
-        except Exception as e:
-            messagebox.showerror("User", f"Failed: {e}")
+            new = simpledialog.askstring("Reset Password",
+                                         f"Enter new password for {username}:",
+                                         show="•", parent=parent)
+        finally:
+            if parent is not None:
+                parent.attributes("-topmost", False)
+        if not new:
+            return
+        reset_password(uid, new)
+        self._refresh_users(tree)
+        messagebox.showinfo("User", "Password reset success!")
 
     def _toggle_user_active(self, tree):
         sel = tree.selection()
@@ -1352,29 +1365,47 @@ class VoucherApp(ctk.CTk):
         e_phone = ctk.CTkEntry(frm, width=200); e_phone.grid(row=1, column=3, sticky="w", padx=8, pady=4)
 
         # Photo preview
-        preview_frame = ctk.CTkFrame(frm, height=220); preview_frame.grid(row=2, column=0, columnspan=4, sticky="ew", padx=8, pady=(6,6))
-        preview_frame.grid_columnconfigure(0, weight=1)
-        ph_label = ctk.CTkLabel(preview_frame, text="No photo selected"); ph_label.pack(anchor="w", padx=8, pady=6)
-        img_container = tk.Label(preview_frame, bd=1, relief="solid"); img_container.pack(padx=8, pady=(0,8), ipadx=4, ipady=4)
-        img_container.configure(width=160, height=160)
-        _preview_img_tk = {"im": None}  # keep ref
+        NAME_W = 260
+        preview_frame = ctk.CTkFrame(frm, width=NAME_W+20, height=160)
+        preview_frame.grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 6))
+        preview_frame.grid_propagate(False)   # keep our compact size
+
+        ph_label = ctk.CTkLabel(preview_frame, text="No photo selected")
+        ph_label.pack(anchor="w", padx=8, pady=6)
+
+        img_container = tk.Label(preview_frame, bd=1, relief="solid")
+        img_container.pack(padx=8, pady=(0, 8))
+        img_container.configure(width=NAME_W, height=120)  # narrow and short
+
+        _preview_img_tk = {"im": None}
 
         def _show_preview(path):
             try:
-                im = Image.open(path); im = ImageOps.exif_transpose(im)
-                # fit into 200x200 square
-                im.thumbnail((160,160), Image.LANCZOS)
+                im = Image.open(path)
+                im = ImageOps.exif_transpose(im)
+                im.thumbnail((NAME_W, 120), Image.LANCZOS)
                 tkimg = ImageTk.PhotoImage(im)
-                img_container.configure(image=tkimg); _preview_img_tk["im"] = tkimg
+                img_container.configure(image=tkimg)
+                _preview_img_tk["im"] = tkimg
             except Exception as e:
                 ph_label.configure(text=f"Failed to preview: {e}")
+
 
         def choose_photo():
             p = filedialog.askopenfilename(filetypes=[("Image", "*.jpg;*.jpeg;*.png")])
             if p:
-                ph_label.configure(text=p); _show_preview(p)
+                ph_label.configure(text=p)
+                _show_preview(p)
 
-        white_btn(frm, text="Choose Photo", command=choose_photo, width=140).grid(row=3, column=3, sticky="e", pady=(0,6))
+        def remove_photo():
+            ph_label.configure(text="No photo selected")
+            img_container.configure(image="")
+            _preview_img_tk["im"] = None
+
+        btn_photo_bar = ctk.CTkFrame(frm)
+        btn_photo_bar.grid(row=3, column=1, sticky="w", pady=(0, 6), padx=8)
+        white_btn(btn_photo_bar, text="Choose Photo", command=choose_photo, width=140).pack(side="left", padx=(0, 8))
+        white_btn(btn_photo_bar, text="Remove Photo", command=remove_photo, width=140).pack(side="left")
 
         def _insert_staff():
             name = e_name.get().strip()
@@ -1405,13 +1436,24 @@ class VoucherApp(ctk.CTk):
 
         white_btn(frm, text="Add Staff", command=_insert_staff, width=130).grid(row=4, column=3, sticky="e", pady=6)
 
-        cols = ("id","position","staff_id","name","phone")  # photo column removed
-        tree = ttk.Treeview(frm, columns=cols, show="headings", selectmode="browse", height=8)
-        for c, t, w in [("id","ID",60), ("position","Position",140), ("staff_id","StaffID",160),
-                        ("name","Name",260), ("phone","Phone",160)]:
-            tree.heading(c, text=t); tree.column(c, width=w, anchor="w", stretch=False)
-        tree.grid(row=5, column=0, columnspan=4, sticky="nsew")
-        sb = ttk.Scrollbar(frm, orient="vertical", command=tree.yview); sb.grid(row=5, column=4, sticky="ns")
+        # --- compact staff list ---
+        LIST_W = NAME_W + 420  # tune as you like
+        list_wrap = ctk.CTkFrame(frm, width=LIST_W, height=220)
+        list_wrap.grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 0))
+        list_wrap.grid_propagate(False)
+
+        tree = ttk.Treeview(list_wrap, columns=("id","position","staff_id","name","phone"),
+                            show="headings", selectmode="browse", height=8)
+        for c, t, w in [
+            ("id","ID",60), ("position","Position",140), ("staff_id","StaffID",140),
+            ("name","Name",240), ("phone","Phone",140)
+        ]:
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor="w", stretch=False)
+        tree.pack(side="left", fill="both", expand=False)
+
+        sb = ttk.Scrollbar(list_wrap, orient="vertical", command=tree.yview)
+        sb.pack(side="right", fill="y")
         tree.configure(yscrollcommand=sb.set)
         freeze_tree_columns(tree)
 
@@ -1478,22 +1520,40 @@ class VoucherApp(ctk.CTk):
         e_comm = ctk.CTkEntry(frm, width=200); e_comm.grid(row=4, column=1, sticky="w", padx=8, pady=6)
 
         # Bill image selection + preview
-        bill_lbl = ctk.CTkLabel(frm, text="No bill image selected"); bill_lbl.grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(6,2))
-        preview = tk.Label(frm, bd=1, relief="solid"); preview.grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0,8))
-        preview.configure(width=180, height=180)
+        bill_lbl = ctk.CTkLabel(frm, text="No bill image selected")
+        bill_lbl.grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+
+        preview = tk.Label(frm, bd=1, relief="solid")
+        preview.grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+        preview.configure(width=180, height=140)
         _bill_img_tk = {"im": None}
+
         def show_bill_preview(path):
             try:
-                im = Image.open(path); im = ImageOps.exif_transpose(im)
-                im.thumbnail((180,180), Image.LANCZOS)
-                tkimg = ImageTk.PhotoImage(im); preview.configure(image=tkimg); _bill_img_tk["im"] = tkimg
+                im = Image.open(path)
+                im = ImageOps.exif_transpose(im)
+                im.thumbnail((180, 140), Image.LANCZOS)
+                tkimg = ImageTk.PhotoImage(im)
+                preview.configure(image=tkimg)
+                _bill_img_tk["im"] = tkimg
             except Exception as e:
                 bill_lbl.configure(text=f"Preview failed: {e}")
+
         def choose_bill():
-            p = filedialog.askopenfilename(filetypes=[("Image","*.jpg;*.jpeg;*.png")])
+            p = filedialog.askopenfilename(filetypes=[("Image", "*.jpg;*.jpeg;*.png")])
             if p:
-                bill_lbl.configure(text=p); show_bill_preview(p)
-        white_btn(frm, text="Choose Bill Image", width=160, command=choose_bill).grid(row=5, column=1, sticky="e")
+                bill_lbl.configure(text=p)
+                show_bill_preview(p)
+
+        def remove_bill():
+            bill_lbl.configure(text="No bill image selected")
+            preview.configure(image="")
+            _bill_img_tk["im"] = None
+
+        btn_bill_bar = ctk.CTkFrame(frm)
+        btn_bill_bar.grid(row=5, column=1, sticky="e", padx=8)
+        white_btn(btn_bill_bar, text="Choose Bill Image", width=160, command=choose_bill).pack(side="left", padx=(0, 8))
+        white_btn(btn_bill_bar, text="Remove Image", width=140, command=remove_bill).pack(side="left")
 
         def validate_bill():
             s = (e_bill.get() or "").strip().upper(); btype = cb_type.get()
