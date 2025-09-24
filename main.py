@@ -1343,152 +1343,182 @@ class VoucherApp(ctk.CTk):
 
     # ---------- Staff Profile UI (preview + folder open) ----------
     def staff_profile(self):
-        top = ctk.CTkToplevel(self); top.title("Staff Profile"); top.geometry("900x640"); top.grab_set()
+        # ---- fixed-size, no-blank layout ----
+        top = ctk.CTkToplevel(self)
+        top.title("Staff Profile")
+        top.geometry("900x640")
+        top.resizable(False, False)  # constant-size window
+        top.grab_set()
 
-        outer, frm = make_xy_scroller(top)  # new
-        outer.pack(fill="both", expand=True, padx=10, pady=10)
-        frm.grid_columnconfigure(1, weight=1)
+        # One root frame that fills the whole window (no XY scroller here)
+        frm = ctk.CTkFrame(top)
+        frm.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Make all columns share width and let row 5 (the table) take remaining height
+        for c in range(4):
+            frm.grid_columnconfigure(c, weight=1)
         frm.grid_rowconfigure(5, weight=1)
 
+        # ---- top fields ----
         ctk.CTkLabel(frm, text="Position").grid(row=0, column=0, sticky="w")
         roles = ["Salesman","Technician","Boss"]
         cb_pos = ctk.CTkComboBox(frm, values=roles, width=200); cb_pos.set("Technician")
         cb_pos.grid(row=0, column=1, sticky="w", padx=8, pady=4)
 
         ctk.CTkLabel(frm, text="Staff/Technician ID (optional)").grid(row=0, column=2, sticky="w")
-        e_sid = ctk.CTkEntry(frm, width=200); e_sid.grid(row=0, column=3, sticky="w", padx=8, pady=4)
+        e_sid = ctk.CTkEntry(frm); e_sid.grid(row=0, column=3, sticky="ew", padx=8, pady=4)
 
         ctk.CTkLabel(frm, text="Name").grid(row=1, column=0, sticky="w")
-        e_name = ctk.CTkEntry(frm, width=260); e_name.grid(row=1, column=1, sticky="w", padx=8, pady=4)
+        e_name = ctk.CTkEntry(frm); e_name.grid(row=1, column=1, sticky="ew", padx=8, pady=4)
 
         ctk.CTkLabel(frm, text="Contact Number").grid(row=1, column=2, sticky="w")
-        e_phone = ctk.CTkEntry(frm, width=200); e_phone.grid(row=1, column=3, sticky="w", padx=8, pady=4)
+        e_phone = ctk.CTkEntry(frm); e_phone.grid(row=1, column=3, sticky="ew", padx=8, pady=4)
 
-        # Photo preview
-        NAME_W = 260
-        preview_frame = ctk.CTkFrame(frm, width=NAME_W+20, height=160)
+        # ---- PHOTO PREVIEW (constant size before/after) ----
+        NAME_W = 260          # logical preview width for image
+        IMG_W  = NAME_W
+        IMG_H  = 120
+        PREVIEW_H = 160       # frame height (label + canvas)
+        preview_frame = ctk.CTkFrame(frm, width=NAME_W + 20, height=PREVIEW_H)
         preview_frame.grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 6))
-        preview_frame.grid_propagate(False)   # keep our compact size
+        preview_frame.grid_propagate(False)  # keep the frame compact
 
         ph_label = ctk.CTkLabel(preview_frame, text="No photo selected")
         ph_label.pack(anchor="w", padx=8, pady=6)
 
-        img_container = tk.Label(preview_frame, bd=1, relief="solid")
-        img_container.pack(padx=8, pady=(0, 8))
-        img_container.configure(width=NAME_W, height=120)  # narrow and short
+        # Use a Canvas so width/height are in pixels and never change
+        img_canvas = tk.Canvas(preview_frame, width=IMG_W, height=IMG_H,
+                               bd=1, relief="solid", highlightthickness=1)
+        img_canvas.pack(padx=8, pady=(0, 8))
 
-        _preview_img_tk = {"im": None}
+        _preview_img_tk = {"im": None}  # keep a ref so Tk doesn't GC the image
 
-        def _show_preview(path):
-            try:
-                im = Image.open(path)
-                im = ImageOps.exif_transpose(im)
-                im.thumbnail((NAME_W, 120), Image.LANCZOS)
-                tkimg = ImageTk.PhotoImage(im)
-                img_container.configure(image=tkimg)
-                _preview_img_tk["im"] = tkimg
-            except Exception as e:
-                ph_label.configure(text=f"Failed to preview: {e}")
-
-
-        def choose_photo():
-            p = filedialog.askopenfilename(filetypes=[("Image", "*.jpg;*.jpeg;*.png")])
-            if p:
-                ph_label.configure(text=p)
-                _show_preview(p)
-
-        def remove_photo():
-            ph_label.configure(text="No photo selected")
-            img_container.configure(image="")
+    def _show_preview(path):
+        try:
+            im = Image.open(path)
+            im = ImageOps.exif_transpose(im)
+            im.thumbnail((IMG_W, IMG_H), Image.LANCZOS)
+            tkimg = ImageTk.PhotoImage(im)
+            img_canvas.delete("all")  # clear whatever was there
+            # center the image in the fixed canvas
+            img_canvas.create_image(IMG_W // 2, IMG_H // 2, image=tkimg)
+            _preview_img_tk["im"] = tkimg
+        except Exception as e:
+            img_canvas.delete("all")
             _preview_img_tk["im"] = None
+            ph_label.configure(text=f"Failed to preview: {e}")
 
-        btn_photo_bar = ctk.CTkFrame(frm)
-        btn_photo_bar.grid(row=3, column=1, sticky="w", pady=(0, 6), padx=8)
-        white_btn(btn_photo_bar, text="Choose Photo", command=choose_photo, width=140).pack(side="left", padx=(0, 8))
-        white_btn(btn_photo_bar, text="Remove Photo", command=remove_photo, width=140).pack(side="left")
+    def choose_photo():
+        p = filedialog.askopenfilename(filetypes=[("Image", "*.jpg;*.jpeg;*.png")])
+        if p:
+            ph_label.configure(text=p)
+            _show_preview(p)
 
-        def _insert_staff():
-            name = e_name.get().strip()
-            if not name:
-                messagebox.showerror("Staff", "Name required."); return
-            pos = cb_pos.get(); sid = e_sid.get().strip(); phone = e_phone.get().strip()
-            photo_src = ph_label.cget("text") if ph_label.cget("text") != "No photo selected" else ""
-            photo_path = ""
-            # ensure folders exist now
-            base_dir, com_dir = staff_dirs_for(name)
-            if photo_src:
-                fn = f"profile_{int(datetime.now().timestamp())}.jpg"
-                photo_path = os.path.join(base_dir, fn)
-                try:
-                    _process_square_image(photo_src, photo_path, max_px=400)
-                except Exception as e:
-                    messagebox.showerror("Photo", f"Failed to process photo: {e}")
-                    photo_path = ""
-            conn = get_conn(); cur = conn.cursor()
-            cur.execute("""INSERT INTO staffs (position, staff_id_opt, name, phone, photo_path, created_at, updated_at)
-                           VALUES (?,?,?,?,?,?,?)""",
-                        (pos, sid, name, phone, photo_path,
-                         datetime.now().isoformat(sep=" ", timespec="seconds"),
-                         datetime.now().isoformat(sep=" ", timespec="seconds")))
-            conn.commit(); conn.close()
-            refresh(); e_name.delete(0,"end"); e_phone.delete(0,"end"); e_sid.delete(0,"end")
-            ph_label.configure(text="No photo selected"); img_container.configure(image=""); _preview_img_tk["im"] = None
+    def remove_photo():
+        ph_label.configure(text="No photo selected")
+        img_canvas.delete("all")
+        _preview_img_tk["im"] = None
 
-        white_btn(frm, text="Add Staff", command=_insert_staff, width=130).grid(row=4, column=3, sticky="e", pady=6)
+    btn_photo_bar = ctk.CTkFrame(frm)
+    btn_photo_bar.grid(row=3, column=1, sticky="w", pady=(0, 6), padx=8)
+    white_btn(btn_photo_bar, text="Choose Photo", command=choose_photo, width=140)\
+        .pack(side="left", padx=(0, 8))
+    white_btn(btn_photo_bar, text="Remove Photo", command=remove_photo, width=140)\
+        .pack(side="left")
 
-        # --- compact staff list ---
-        LIST_W = NAME_W + 420  # tune as you like
-        list_wrap = ctk.CTkFrame(frm, width=LIST_W, height=220)
-        list_wrap.grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 0))
-        list_wrap.grid_propagate(False)
-
-        tree = ttk.Treeview(list_wrap, columns=("id","position","staff_id","name","phone"),
-                            show="headings", selectmode="browse", height=8)
-        for c, t, w in [
-            ("id","ID",60), ("position","Position",140), ("staff_id","StaffID",140),
-            ("name","Name",240), ("phone","Phone",140)
-        ]:
-            tree.heading(c, text=t)
-            tree.column(c, width=w, anchor="w", stretch=False)
-        tree.pack(side="left", fill="both", expand=False)
-
-        sb = ttk.Scrollbar(list_wrap, orient="vertical", command=tree.yview)
-        sb.pack(side="right", fill="y")
-        tree.configure(yscrollcommand=sb.set)
-        freeze_tree_columns(tree)
-
-        def refresh():
-            tree.delete(*tree.get_children())
-            conn = get_conn(); cur = conn.cursor()
-            cur.execute("SELECT id, position, staff_id_opt, name, phone FROM staffs ORDER BY name")
-            for r in cur.fetchall():
-                tree.insert("", "end", values=r)
-            conn.close()
-        refresh()
-
-        def delete_sel():
-            sel = tree.selection()
-            if not sel: return
-            sid = tree.item(sel[0])["values"][0]
-            if not messagebox.askyesno("Delete", "Delete selected staff?"): return
-            conn = get_conn(); cur = conn.cursor()
-            cur.execute("DELETE FROM staffs WHERE id=?", (sid,))
-            conn.commit(); conn.close(); refresh()
-        white_btn(frm, text="Delete Selected", command=delete_sel, width=150).grid(row=6, column=3, sticky="e", pady=8)
-
-        def open_staff_folder():
-            sel = tree.selection()
-            if not sel: 
-                messagebox.showinfo("Open Folder", "Select a staff row first."); return
-            name = tree.item(sel[0])["values"][3]
-            base_dir, _ = staff_dirs_for(name)
+    # ---- Add Staff (unchanged logic; uses fixed preview foldering) ----
+    def _insert_staff():
+        name = e_name.get().strip()
+        if not name:
+            messagebox.showerror("Staff", "Name required."); return
+        pos = cb_pos.get(); sid = e_sid.get().strip(); phone = e_phone.get().strip()
+        photo_src = ph_label.cget("text") if ph_label.cget("text") != "No photo selected" else ""
+        photo_path = ""
+        base_dir, _ = staff_dirs_for(name)
+        if photo_src:
+            fn = f"profile_{int(datetime.now().timestamp())}.jpg"
+            photo_path = os.path.join(base_dir, fn)
             try:
-                if sys.platform.startswith("win"): os.startfile(base_dir)  # type: ignore
-                elif sys.platform == "darwin": os.system(f"open '{base_dir}'")
-                else: os.system(f"xdg-open '{base_dir}'")
+                _process_square_image(photo_src, photo_path, max_px=400)
             except Exception as e:
-                messagebox.showerror("Open Folder", f"Unable to open folder:\\n{e}")
-        white_btn(frm, text="Open Staff Folder", command=open_staff_folder, width=170).grid(row=6, column=2, sticky="e", pady=8)
+                messagebox.showerror("Photo", f"Failed to process photo: {e}")
+                photo_path = ""
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""INSERT INTO staffs (position, staff_id_opt, name, phone, photo_path, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (pos, sid, name, phone, photo_path,
+                     datetime.now().isoformat(sep=" ", timespec="seconds"),
+                     datetime.now().isoformat(sep=" ", timespec="seconds")))
+        conn.commit(); conn.close()
+        refresh()
+        e_name.delete(0,"end"); e_phone.delete(0,"end"); e_sid.delete(0,"end")
+        remove_photo()
+
+    white_btn(frm, text="Add Staff", command=_insert_staff, width=130)\
+        .grid(row=4, column=3, sticky="e", pady=6)
+
+    # ---- LIST (fills the rest; no fixed pixel size, no pack) ----
+    list_wrap = ctk.CTkFrame(frm)
+    list_wrap.grid(row=5, column=0, columnspan=4, sticky="nsew", padx=8, pady=(6, 0))
+    list_wrap.grid_rowconfigure(0, weight=1)
+    list_wrap.grid_columnconfigure(0, weight=1)
+
+    tree = ttk.Treeview(
+        list_wrap,
+        columns=("id","position","staff_id","name","phone"),
+        show="headings", selectmode="browse"
+    )
+    for c, t, w in [
+        ("id","ID",60), ("position","Position",140), ("staff_id","StaffID",140),
+        ("name","Name",240), ("phone","Phone",140)
+    ]:
+        tree.heading(c, text=t)
+        tree.column(c, width=w, anchor="w", stretch=False)
+
+    tree.grid(row=0, column=0, sticky="nsew")
+    sb = ttk.Scrollbar(list_wrap, orient="vertical", command=tree.yview)
+    sb.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=sb.set)
+    freeze_tree_columns(tree)
+
+    # actions under the list
+    def refresh():
+        tree.delete(*tree.get_children())
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("SELECT id, position, staff_id_opt, name, phone FROM staffs ORDER BY name")
+        for r in cur.fetchall():
+            tree.insert("", "end", values=r)
+        conn.close()
+    refresh()
+
+    def delete_sel():
+        sel = tree.selection()
+        if not sel: return
+        sid = tree.item(sel[0])["values"][0]
+        if not messagebox.askyesno("Delete", "Delete selected staff?"): return
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("DELETE FROM staffs WHERE id=?", (sid,))
+        conn.commit(); conn.close(); refresh()
+
+    def open_staff_folder():
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Open Folder", "Select a staff row first."); return
+        name = tree.item(sel[0])["values"][3]
+        base_dir, _ = staff_dirs_for(name)
+        try:
+            if sys.platform.startswith("win"): os.startfile(base_dir)  # type: ignore
+            elif sys.platform == "darwin": os.system(f"open '{base_dir}'")
+            else: os.system(f"xdg-open '{base_dir}'")
+        except Exception as e:
+            messagebox.showerror("Open Folder", f"Unable to open folder:\n{e}")
+
+    # bottom-right buttons (same row as list, different columns)
+    white_btn(frm, text="Open Staff Folder", command=open_staff_folder, width=170)\
+        .grid(row=6, column=2, sticky="e", pady=8)
+    white_btn(frm, text="Delete Selected", command=delete_sel, width=150)\
+        .grid(row=6, column=3, sticky="e", pady=8)
+
 
     # ---------- Commission UI (with preview + per-staff storage) ----------
     def add_commission(self):
