@@ -2210,7 +2210,7 @@ class VoucherApp(ctk.CTk):
             
     # ---------- Users (Admin-only UI) ----------
     def manage_users(self):
-    """Improved User Accounts manager:
+        """Improved User Accounts manager:
        - admin-only
        - single-instance (re-use existing window)
        - fixed, non-resizable window (1000x600)
