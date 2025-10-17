@@ -2377,24 +2377,24 @@ class VoucherApp(ctk.CTk):
                         except Exception:
                             pass
             # estimate min width per column (7 px per char)
-            min_widths = []
-            for cid in cols:
-                longest = max((len(s) for s in samples[cid]), default=6)
-                min_widths.append(max(60, int(longest * 7 + 20)))
-            sum_min = sum(min_widths)
-            if sum_min <= total_w:
-                extra = total_w - sum_min
-                widths = [mw + int(extra * (mw / sum_min)) for mw in min_widths]
-            else:
-                factor = total_w / sum_min
-                widths = [max(60, int(mw * factor)) for mw in min_widths]
-            # apply widths
-            for cid, w in zip(cols, widths):
-                tree.column(cid, width=w, anchor="w", stretch=False)
-        except Exception:
-            # fallback widths
-            for cid in cols:
-                tree.column(cid, width=150, anchor="w", stretch=True)
+                min_widths = []
+                for cid in cols:
+                    longest = max((len(s) for s in samples[cid]), default=6)
+                    min_widths.append(max(60, int(longest * 7 + 20)))
+                sum_min = sum(min_widths)
+                if sum_min <= total_w:
+                    extra = total_w - sum_min
+                    widths = [mw + int(extra * (mw / sum_min)) for mw in min_widths]
+                else:
+                    factor = total_w / sum_min
+                    widths = [max(60, int(mw * factor)) for mw in min_widths]
+                # apply widths
+                for cid, w in zip(cols, widths):
+                    tree.column(cid, width=w, anchor="w", stretch=False)
+            except Exception:
+                # fallback widths
+                for cid in cols:
+                    tree.column(cid, width=150, anchor="w", stretch=True)
 
         # Populate table by invoking your existing _refresh_users (which fills the same tree)
         # But ensure _refresh_users uses the same 'tree' variable name; if not, we provide a small wrapper
