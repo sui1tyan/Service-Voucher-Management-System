@@ -2790,6 +2790,7 @@ class VoucherApp(ctk.CTk):
 
     # ---------- Commission UI (with preview + per-staff storage) ----------
     def add_commission(self):
+        top = ctk.CTkToplevel(self)        
         top.title("Add Commission")
         # reduced height so form fields align horizontally with the Save button
         top.geometry("900x420")
@@ -2951,7 +2952,7 @@ class VoucherApp(ctk.CTk):
         top = ctk.CTkToplevel(self)
         top.title("Commissions")
         # increase height so the tree, horizontal scrollbar and buttons are visible
-        top.geometry("950x720")
+        top.geometry("1080x720")
         top.resizable(False, False)
         top.grab_set()
 
