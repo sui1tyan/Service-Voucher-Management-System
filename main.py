@@ -2231,7 +2231,7 @@ class VoucherApp(ctk.CTk):
 
         top = ctk.CTkToplevel(self)
         top.title("User Accounts")
-        TOP_W, TOP_H = 1000, 600
+        TOP_W, TOP_H = 1200, 700
         top.geometry(f"{TOP_W}x{TOP_H}")
         top.resizable(False, False)
         top.grab_set()
@@ -2552,16 +2552,96 @@ class VoucherApp(ctk.CTk):
         ctk.CTkLabel(panel, text="Name").grid(row=1, column=0, padx=(6,8), sticky="w", pady=(8,0))
         e_name = ctk.CTkEntry(panel, width=SHARED_WIDTH)
         e_name.grid(row=1, column=1, padx=(0,8), sticky="w", pady=(8,0))
-    
-        ctk.CTkLabel(panel, text="Phone").grid(row=1, column=2, padx=(6,8), sticky="w", pady=(8,0))
+
+        # changed label text to "Phone Number"
+        ctk.CTkLabel(panel, text="Phone Number").grid(row=1, column=2, padx=(6,8), sticky="w", pady=(8,0))
         e_phone = ctk.CTkEntry(panel, width=160)
         e_phone.grid(row=1, column=3, padx=(0,8), sticky="w", pady=(8,0))
 
-        # Add / Save / Cancel buttons (hook to your existing handlers)
+        # Add / Save / Cancel buttons (inline handlers)
         btn_panel = ctk.CTkFrame(panel)
         btn_panel.grid(row=0, column=4, rowspan=2, padx=(8,4), sticky="e")
-        white_btn(btn_panel, text="Add", width=100, command=lambda: self._add_staff_and_refresh(e_staffid, e_name, cb_pos, e_phone, tree)).pack(side="top", pady=(0,6))
-        white_btn(btn_panel, text="Save", width=100, command=lambda: self._save_staff_and_refresh(e_staffid, e_name, cb_pos, e_phone, tree)).pack(side="top", pady=(0,6))
+
+        def on_add():
+            name = e_name.get().strip()
+            staff_id_opt = e_staffid.get().strip()
+            position = cb_pos.get().strip()
+            phone = e_phone.get().strip()
+            if not name:
+                messagebox.showerror("Missing", "Please enter Name.")
+                return
+            now = datetime.now().isoformat(sep=" ", timespec="seconds")
+            try:
+                conn = get_conn()
+                cur = conn.cursor()
+                # Insert if not exists, otherwise update fields for that name
+                cur.execute("""
+                    INSERT OR IGNORE INTO staffs (position, staff_id_opt, name, phone, photo_path, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (position, staff_id_opt, name, phone, "", now, now))
+                # Ensure the record has up-to-date fields (staff_id_opt/position/phone)
+                cur.execute("""
+                    UPDATE staffs
+                       SET position=?, staff_id_opt=?, phone=?, updated_at=?
+                     WHERE name=?
+                """, (position, staff_id_opt, phone, now, name))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                messagebox.showerror("Add Staff", f"Failed to add staff:\n{e}")
+                return
+            # clear inputs and refresh table (refresh() is defined later in this method)
+            e_staffid.delete(0, "end")
+            e_name.delete(0, "end")
+            e_phone.delete(0, "end")
+            cb_pos.set("Technician")
+            try:
+                refresh()
+            except Exception:
+                pass
+
+        def on_save():
+            # Save behaves like update: update currently selected tree row or update by Name
+            sel = None
+            try:
+                sel = tree.selection()
+            except Exception:
+                pass
+            name = e_name.get().strip()
+            staff_id_opt = e_staffid.get().strip()
+            position = cb_pos.get().strip()
+            phone = e_phone.get().strip()
+            if not name:
+                messagebox.showerror("Missing", "Please enter Name.")
+                return
+            now = datetime.now().isoformat(sep=" ", timespec="seconds")
+            try:
+                conn = get_conn()
+                cur = conn.cursor()
+                # Update by name if exists; otherwise insert
+                cur.execute("SELECT id FROM staffs WHERE name=?", (name,))
+                row = cur.fetchone()
+                if row:
+                    cur.execute("""
+                        UPDATE staffs SET position=?, staff_id_opt=?, phone=?, updated_at=? WHERE name=?
+                    """, (position, staff_id_opt, phone, now, name))
+                else:
+                    cur.execute("""
+                        INSERT INTO staffs (position, staff_id_opt, name, phone, photo_path, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (position, staff_id_opt, name, phone, "", now, now))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                messagebox.showerror("Save Staff", f"Failed to save staff:\n{e}")
+                return
+            try:
+                refresh()
+            except Exception:
+                pass
+
+        white_btn(btn_panel, text="Add", width=100, command=on_add).pack(side="top", pady=(0,6))
+        white_btn(btn_panel, text="Save", width=100, command=on_save).pack(side="top", pady=(0,6))
         white_btn(btn_panel, text="Cancel", width=100, command=lambda: (e_staffid.delete(0,'end'), e_name.delete(0,'end'), e_phone.delete(0,'end'), cb_pos.set("Technician"))).pack(side="top")
 
         # Row 1: Treeview container
