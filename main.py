@@ -63,8 +63,6 @@ def validate_password_policy(pw: str) -> str | None:
         return "Password cannot be empty."
     return None   # ✅ everything else is acceptable
 
-
-
 # ---------- Wrapped text helpers for PDF ----------
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
@@ -2210,23 +2208,14 @@ class VoucherApp(ctk.CTk):
             
     # ---------- Users (Admin-only UI) ----------
     def manage_users(self):
-        """Improved User Accounts manager:
-       - admin-only
-       - single-instance (re-use existing window)
-       - fixed, non-resizable window (1000x600)
-       - vertical scrollbar only, table columns auto-fit to fill width
-       - re-uses existing helper methods in your file
-    """
-        # Admin-only guard (keeps your original behavior)
-        try:
-            if not getattr(self, "_role_is", lambda r: False)("admin"):
-                messagebox.showerror("Permission", "Admin only.")
-                return
-        except Exception:
-            try:
-                messagebox.showerror("Permission", "Admin only.")
-            except Exception:
-                pass
+        """User Accounts manager (admin-only).
+        Replaced earlier version that referenced missing helpers.
+        This self-contained implementation uses the DB helpers already in the file:
+        list_users, create_user, update_user, delete_user, reset_password.
+        """
+        # Admin-only guard
+        if not self._role_is("admin"):
+            messagebox.showerror("Permission", "Admin only.")
             return
 
         # single-instance guard
@@ -2249,91 +2238,98 @@ class VoucherApp(ctk.CTk):
         self._open_windows["manage_users"] = top
         top.protocol("WM_DELETE_WINDOW", lambda: (self._open_windows.pop("manage_users", None), top.destroy()))
 
-        # Toolbar (Add / Edit / Delete / Reset / Toggle / Refresh / Search)
+        # --- Toolbar ---
         toolbar = ctk.CTkFrame(top)
         toolbar.pack(fill="x", padx=8, pady=(8, 6))
 
-        # Use your existing helper functions where available
+        # Search box (shared)
+        ctk.CTkLabel(toolbar, text="Search:").pack(side="right", padx=(6,4))
+        search_var = tk.StringVar()
+        e_search = ctk.CTkEntry(toolbar, textvariable=search_var, width=260)
+        e_search.pack(side="right", padx=(0,8))
+        def do_refresh():
+            refresh_users()
+        try:
+            e_search.bind("<Return>", lambda e: do_refresh())
+        except Exception:
+            pass
+
+        # Button handlers implemented inline (use DB helper functions)
         def on_add():
-            try:
-                # prefer your existing add UI if present
-                self._add_user_dialog()  # if you have a dialog function named like this
-            except Exception:
-                try:
-                    # fallback to original helper you already used in this file
-                    # If you used a different 'add' implementation, this will call your own _add_user_and_refresh via a simple inline
-                    self._add_user_and_refresh  # no-op reference to avoid crash; actual add is handled by panel button below
-                except Exception:
-                    pass
-            # ensure refresh after add (your helper _add_user_and_refresh already refreshes)
-            try:
-                self._refresh_users(tree)
-            except Exception:
-                pass
+            show_add_edit_dialog(mode="add")
 
         def on_edit():
             sel = tree.selection()
             if not sel:
                 messagebox.showinfo("Edit user", "Select a user row first.")
                 return
-            try:
-                # Prefer your existing _edit_user handler
-                self._edit_user(tree, top)
-            except Exception:
-                # fallback: try passing username
-                item = tree.item(sel[0])["values"]
-                uname = item[1] if len(item) > 1 else None
-                try:
-                    self.edit_user_ui(username=uname)
-                except Exception:
-                    messagebox.showinfo("Edit user", "Edit handler missing; implement _edit_user or edit_user_ui(username=...)")
+            vals = tree.item(sel[0])["values"]
+            uid = vals[0]
+            show_add_edit_dialog(mode="edit", user_id=uid)
 
         def on_delete():
-            try:
-                self._delete_user(tree)
-            except Exception as e:
-                messagebox.showerror("Delete user", f"Delete handler error: {e}")
-            try:
-                self._refresh_users(tree)
-            except Exception:
-                pass
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Delete user", "Select a user row first.")
+                return
+            vals = tree.item(sel[0])["values"]
+            uid = vals[0]
+            uname = vals[1]
+            if messagebox.askyesno("Delete", f"Delete user '{uname}'?"):
+                try:
+                    delete_user(uid)
+                except Exception as e:
+                    messagebox.showerror("Delete user", f"Delete failed:\n{e}")
+            refresh_users()
 
         def on_reset():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Reset Password", "Select a user row first.")
+                return
+            vals = tree.item(sel[0])["values"]
+            uid = vals[0]
+            uname = vals[1]
+            newpwd = simpledialog.askstring("Reset Password", f"Enter new password for {uname}:", parent=top, show="•")
+            if not newpwd:
+                return
             try:
-                self._reset_user_password(tree, top)
+                reset_password(uid, newpwd)
             except Exception as e:
-                messagebox.showerror("Reset Password", f"Reset handler error: {e}")
+                messagebox.showerror("Reset Password", f"Failed:\n{e}")
+            else:
+                messagebox.showinfo("Reset Password", "Password reset successfully.")
 
         def on_toggle_active():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Toggle Active", "Select a user row first.")
+                return
+            vals = tree.item(sel[0])["values"]
+            uid = vals[0]
             try:
-                self._toggle_user_active(tree)
+                # read current is_active from DB (list_users returns that info)
+                for u in list_users():
+                    if u[0] == uid:
+                        cur_active = u[3]
+                        break
+                else:
+                    messagebox.showerror("Toggle Active", "User record not found.")
+                    return
+                update_user(uid, is_active=0 if cur_active else 1)
             except Exception as e:
-                messagebox.showerror("Toggle Active", f"Toggle handler error: {e}")
+                messagebox.showerror("Toggle Active", f"Failed:\n{e}")
+            refresh_users()
 
-        def on_refresh():
-            try:
-                self._refresh_users(tree)
-            except Exception:
-                pass
-
+        # toolbar buttons (left)
         white_btn(toolbar, text="Add", command=on_add, width=100).pack(side="left", padx=(0,6))
         white_btn(toolbar, text="Edit", command=on_edit, width=100).pack(side="left", padx=(0,6))
         white_btn(toolbar, text="Delete", command=on_delete, width=100).pack(side="left", padx=(0,6))
         white_btn(toolbar, text="Reset Password", command=on_reset, width=140).pack(side="left", padx=(0,6))
         white_btn(toolbar, text="Toggle Active", command=on_toggle_active, width=140).pack(side="left", padx=(0,6))
-        white_btn(toolbar, text="Refresh", command=on_refresh, width=100).pack(side="left", padx=(8,12))
+        white_btn(toolbar, text="Refresh", command=do_refresh, width=100).pack(side="left", padx=(8,12))
 
-        # Search box
-        ctk.CTkLabel(toolbar, text="Search:").pack(side="left", padx=(6,4))
-        search_var = tk.StringVar()
-        e_search = ctk.CTkEntry(toolbar, textvariable=search_var, width=260)
-        e_search.pack(side="left", padx=(0,8))
-        try:
-            e_search.bind("<Return>", lambda e: on_refresh())
-        except Exception:
-            pass
-
-        # Main area: treeview with vertical scrollbar only
+        # --- Main area: treeview + scrollbar ---
         mainf = ctk.CTkFrame(top)
         mainf.pack(fill="both", expand=True, padx=8, pady=(0,8))
         mainf.grid_rowconfigure(0, weight=1)
@@ -2344,7 +2340,6 @@ class VoucherApp(ctk.CTk):
         container.grid_rowconfigure(0, weight=1)
         container.grid_columnconfigure(0, weight=1)
 
-        # Re-use your same columns
         cols = ("id", "username", "role", "active", "must_change")
         display_names = {"id":"ID","username":"Username","role":"Role","active":"Active","must_change":"Must Change"}
 
@@ -2354,11 +2349,9 @@ class VoucherApp(ctk.CTk):
         tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
 
-        # headings
         for c in cols:
             tree.heading(c, text=display_names.get(c, c.title()))
 
-        # Helper: autosize columns to exactly fill available width
         def autosize_columns():
             try:
                 container.update_idletasks()
@@ -2366,8 +2359,6 @@ class VoucherApp(ctk.CTk):
                 total_w = container.winfo_width() - padding
                 if total_w <= 0:
                     total_w = TOP_W - 40
-                n = len(cols)
-                # sample header lengths and a few rows
                 samples = {cid: [str(tree.heading(cid)['text'])] for cid in cols}
                 for item in tree.get_children():
                     vals = tree.item(item)["values"]
@@ -2376,7 +2367,6 @@ class VoucherApp(ctk.CTk):
                             samples[cid].append(str(vals[idx] or ""))
                         except Exception:
                             pass
-            # estimate min width per column (7 px per char)
                 min_widths = []
                 for cid in cols:
                     longest = max((len(s) for s in samples[cid]), default=6)
@@ -2388,46 +2378,121 @@ class VoucherApp(ctk.CTk):
                 else:
                     factor = total_w / sum_min
                     widths = [max(60, int(mw * factor)) for mw in min_widths]
-                # apply widths
                 for cid, w in zip(cols, widths):
                     tree.column(cid, width=w, anchor="w", stretch=False)
             except Exception:
-                # fallback widths
                 for cid in cols:
                     tree.column(cid, width=150, anchor="w", stretch=True)
 
-        # Populate table by invoking your existing _refresh_users (which fills the same tree)
-        # But ensure _refresh_users uses the same 'tree' variable name; if not, we provide a small wrapper
-        def refresh_wrapper():
+        def refresh_users():
             try:
-                # if your original _refresh_users accepts a tree argument use it; otherwise it may capture the tree variable
-                try:
-                    self._refresh_users(tree)
-                except TypeError:
-                    # If your _refresh_users doesn't accept tree, replace tree contents manually using list_users()
-                    tree.delete(*tree.get_children())
-                    for (uid, username, role, is_active, must_change) in list_users():
-                        tree.insert("", "end", values=(uid, username, role, "Yes" if is_active else "No", "Yes" if must_change else "No"))
+                tree.delete(*tree.get_children())
+                q = (search_var.get() or "").strip().lower()
+                for (uid, username, role, is_active, must_change) in list_users():
+                    display = (uid, username, role, "Yes" if is_active else "No", "Yes" if must_change else "No")
+                    if not q or q in str(username).lower() or q in str(role).lower():
+                        tree.insert("", "end", values=display)
             except Exception:
                 pass
             autosize_columns()
 
-        # Initial population
-        refresh_wrapper()
-
-        # bind configure to re-autosize if container size ever changes
+        # initial population and bind resizing
+        refresh_users()
         try:
             top.bind("<Configure>", lambda e: autosize_columns())
         except Exception:
             pass
 
-        # wire double-click to edit (uses your existing _edit_user)
+        # double-click to edit
         try:
-            tree.bind("<Double-1>", lambda e: self._edit_user(tree, top))
+            tree.bind("<Double-1>", lambda e: on_edit())
         except Exception:
             pass
 
-        # expose tree variable to outer scope (some helpers expect it)
+        # --- Add / Edit dialog implementation (self-contained) ---
+        def show_add_edit_dialog(mode="add", user_id=None):
+            # mode: "add" or "edit"
+            dlg = ctk.CTkToplevel(top)
+            dlg.transient(top)
+            dlg.grab_set()
+            dlg.title("Add User" if mode=="add" else f"Edit User {user_id}")
+            dlg.geometry("420x260")
+
+            frm = ctk.CTkFrame(dlg)
+            frm.pack(fill="both", expand=True, padx=12, pady=12)
+            frm.grid_columnconfigure(1, weight=1)
+
+            ctk.CTkLabel(frm, text="Username").grid(row=0, column=0, sticky="w", pady=(6,6))
+            e_un = ctk.CTkEntry(frm, width=240)
+            e_un.grid(row=0, column=1, sticky="ew", pady=(6,6))
+
+            ctk.CTkLabel(frm, text="Role").grid(row=1, column=0, sticky="w", pady=(6,6))
+            role_vals = ["admin", "sales assistant", "technician", "user"]
+            cb_role = ctk.CTkComboBox(frm, values=role_vals, width=180)
+            cb_role.set(role_vals[-1])
+            cb_role.grid(row=1, column=1, sticky="w", pady=(6,6))
+
+            ctk.CTkLabel(frm, text="Password").grid(row=2, column=0, sticky="w", pady=(6,6))
+            e_pwd = ctk.CTkEntry(frm, width=240, show="•")
+            e_pwd.grid(row=2, column=1, sticky="ew", pady=(6,6))
+
+            chk_must_change = tk.IntVar(value=0)
+            ctk.CTkCheckBox(frm, text="Must change password on next login", variable=chk_must_change).grid(row=3, column=1, sticky="w", pady=(6,6))
+
+            # If edit: populate fields from DB
+            if mode == "edit" and user_id is not None:
+                for u in list_users():
+                    if u[0] == user_id:
+                        e_un.insert(0, u[1])
+                        cb_role.set(u[2] or "user")
+                        # do not pre-fill password
+                        break
+
+            btns = ctk.CTkFrame(frm)
+            btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12,0))
+
+            def do_save():
+                uname = e_un.get().strip()
+                role = cb_role.get().strip()
+                pwd = e_pwd.get().strip()
+                must = 1 if chk_must_change.get() else 0
+                if not uname:
+                    messagebox.showerror("Missing", "Username required.", parent=dlg)
+                    return
+                if mode == "add":
+                    if not pwd:
+                        messagebox.showerror("Missing", "Password required for new user.", parent=dlg)
+                        return
+                    try:
+                        create_user(uname, role, pwd)
+                        # if must_change, set flag
+                        if must:
+                            # find user id and set must_change flag
+                            for u in list_users():
+                                if u[1] == uname:
+                                    update_user(u[0], must_change=1)
+                                    break
+                        messagebox.showinfo("Added", "User created.", parent=dlg)
+                    except Exception as e:
+                        messagebox.showerror("Add failed", f"{e}", parent=dlg)
+                        return
+                else:
+                    # edit mode: update role and must_change (password change optional)
+                    try:
+                        update_user(user_id, role=role, must_change=must)
+                        if pwd:
+                            reset_password(user_id, pwd)
+                        messagebox.showinfo("Updated", "User updated.", parent=dlg)
+                    except Exception as e:
+                        messagebox.showerror("Update failed", f"{e}", parent=dlg)
+                        return
+                dlg.destroy()
+                refresh_users()
+
+            white_btn(btns, text="Cancel", command=dlg.destroy, width=120).pack(side="right", padx=(6,0))
+            white_btn(btns, text="Save", command=do_save, width=140).pack(side="right")
+
+        # expose tree reference in case other code expects it
         try:
             self._manage_users_tree = tree
         except Exception:
