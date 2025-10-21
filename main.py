@@ -2242,11 +2242,27 @@ class VoucherApp(ctk.CTk):
         toolbar = ctk.CTkFrame(top)
         toolbar.pack(fill="x", padx=8, pady=(8, 6))
 
-        # Search box (shared)
+        # left side: search
+        left_toolbar = ctk.CTkFrame(toolbar)
+        left_toolbar.pack(side="left", fill="x", expand=True)
+
         search_var = tk.StringVar()
-        ctk.CTkLabel(toolbar, text="Search:").pack(side="left", padx=(8,4))
-        e_search = ctk.CTkEntry(toolbar, textvariable=search_var, width=260)
+        ctk.CTkLabel(left_toolbar, text="Search:").pack(side="left", padx=(8,4))
+        e_search = ctk.CTkEntry(left_toolbar, textvariable=search_var, width=320)
         e_search.pack(side="left", padx=(0,8))
+
+        # right side: buttons container so buttons stay grouped to the right
+        right_toolbar = ctk.CTkFrame(toolbar)
+        right_toolbar.pack(side="right", padx=(0,8))
+
+        # small helper to refresh tree (defined before buttons so we can reference it)
+        def do_refresh():
+            try:
+                refresh_users()
+            except Exception:
+                # if refresh_users not available yet, ignore silently
+                pass
+
         try:
             e_search.bind("<Return>", lambda e: do_refresh())
         except Exception:
@@ -2257,7 +2273,12 @@ class VoucherApp(ctk.CTk):
             show_add_edit_dialog(mode="add")
 
         def on_edit():
-            sel = tree.selection()
+            # tree will be defined later; lookup happens at call time
+            try:
+                sel = tree.selection()
+            except Exception:
+                messagebox.showinfo("Edit user", "Select a user row first.")
+                return
             if not sel:
                 messagebox.showinfo("Edit user", "Select a user row first.")
                 return
@@ -2266,7 +2287,11 @@ class VoucherApp(ctk.CTk):
             show_add_edit_dialog(mode="edit", user_id=uid)
 
         def on_delete():
-            sel = tree.selection()
+            try:
+                sel = tree.selection()
+            except Exception:
+                messagebox.showinfo("Delete user", "Select a user row first.")
+                return
             if not sel:
                 messagebox.showinfo("Delete user", "Select a user row first.")
                 return
@@ -2278,10 +2303,14 @@ class VoucherApp(ctk.CTk):
                     delete_user(uid)
                 except Exception as e:
                     messagebox.showerror("Delete user", f"Delete failed:\n{e}")
-            refresh_users()
+            do_refresh()
 
         def on_reset():
-            sel = tree.selection()
+            try:
+                sel = tree.selection()
+            except Exception:
+                messagebox.showinfo("Reset Password", "Select a user row first.")
+                return
             if not sel:
                 messagebox.showinfo("Reset Password", "Select a user row first.")
                 return
@@ -2299,7 +2328,11 @@ class VoucherApp(ctk.CTk):
                 messagebox.showinfo("Reset Password", "Password reset successfully.")
 
         def on_toggle_active():
-            sel = tree.selection()
+            try:
+                sel = tree.selection()
+            except Exception:
+                messagebox.showinfo("Toggle Active", "Select a user row first.")
+                return
             if not sel:
                 messagebox.showinfo("Toggle Active", "Select a user row first.")
                 return
@@ -2307,25 +2340,26 @@ class VoucherApp(ctk.CTk):
             uid = vals[0]
             try:
                 # read current is_active from DB (list_users returns that info)
+                cur_active = None
                 for u in list_users():
                     if u[0] == uid:
                         cur_active = u[3]
                         break
-                else:
+                if cur_active is None:
                     messagebox.showerror("Toggle Active", "User record not found.")
                     return
                 update_user(uid, is_active=0 if cur_active else 1)
             except Exception as e:
                 messagebox.showerror("Toggle Active", f"Failed:\n{e}")
-            refresh_users()
+            do_refresh()
 
-        # toolbar buttons (left)
-        white_btn(toolbar, text="Add", command=on_add, width=100).pack(side="left", padx=(0,6))
-        white_btn(toolbar, text="Edit", command=on_edit, width=100).pack(side="left", padx=(0,6))
-        white_btn(toolbar, text="Delete", command=on_delete, width=100).pack(side="left", padx=(0,6))
-        white_btn(toolbar, text="Reset Password", command=on_reset, width=140).pack(side="left", padx=(0,6))
-        white_btn(toolbar, text="Toggle Active", command=on_toggle_active, width=140).pack(side="left", padx=(0,6))
-        white_btn(toolbar, text="Refresh", command=do_refresh, width=100).pack(side="left", padx=(8,12))
+        # toolbar buttons (grouped on right)
+        white_btn(right_toolbar, text="Add", command=on_add, width=100).pack(side="left", padx=(0,6))
+        white_btn(right_toolbar, text="Edit", command=on_edit, width=100).pack(side="left", padx=(0,6))
+        white_btn(right_toolbar, text="Delete", command=on_delete, width=100).pack(side="left", padx=(0,6))
+        white_btn(right_toolbar, text="Reset Password", command=on_reset, width=140).pack(side="left", padx=(0,6))
+        white_btn(right_toolbar, text="Toggle Active", command=on_toggle_active, width=140).pack(side="left", padx=(0,6))
+        white_btn(right_toolbar, text="Refresh", command=do_refresh, width=100).pack(side="left", padx=(8,0))
 
         # --- Main area: treeview + scrollbar ---
         mainf = ctk.CTkFrame(top)
@@ -2756,12 +2790,12 @@ class VoucherApp(ctk.CTk):
 
     # ---------- Commission UI (with preview + per-staff storage) ----------
     def add_commission(self):
-        top = ctk.CTkToplevel(self)
         top.title("Add Commission")
-        top.geometry("900x640")
+        # reduced height so form fields align horizontally with the Save button
+        top.geometry("900x420")
         top.resizable(False, False)
         top.grab_set()
-
+        
         frm = ctk.CTkFrame(top)
         frm.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -2910,12 +2944,15 @@ class VoucherApp(ctk.CTk):
             messagebox.showinfo("Commission", "Saved.")
             top.destroy()
 
-        white_btn(frm, text="Save", command=save, width=140).grid(row=5, column=3, sticky="e", pady=8)
+        # place Save immediately below input rows so dialog height can be compact
+        white_btn(frm, text="Save", command=save, width=140).grid(row=3, column=3, sticky="e", pady=8)
 
     def view_commissions(self):
         top = ctk.CTkToplevel(self)
         top.title("Commissions")
-        top.geometry("950x560")
+        # increase height so the tree, horizontal scrollbar and buttons are visible
+        top.geometry("950x720")
+        top.resizable(False, False)
         top.grab_set()
 
         frm = ctk.CTkFrame(top)
@@ -3103,7 +3140,9 @@ class VoucherApp(ctk.CTk):
             # Build edit dialog
             etop = ctk.CTkToplevel(self)
             etop.title(f"Edit Commission {cid}")
-            etop.geometry("820x420")
+            # a bit taller so Save/Cancel row and fields are not cut off
+            etop.geometry("900x520")
+            etop.resizable(False, False)
             etop.grab_set()
 
             efrm = ctk.CTkFrame(etop)
