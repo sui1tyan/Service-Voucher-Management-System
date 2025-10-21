@@ -2247,8 +2247,7 @@ class VoucherApp(ctk.CTk):
         search_var = tk.StringVar()
         e_search = ctk.CTkEntry(toolbar, textvariable=search_var, width=260)
         e_search.pack(side="right", padx=(0,8))
-        def do_refresh():
-            refresh_users()
+        ctk.CTkLabel(toolbar, text="Search:").pack(side="right", padx=(6,4))
         try:
             e_search.bind("<Return>", lambda e: do_refresh())
         except Exception:
@@ -2558,11 +2557,11 @@ class VoucherApp(ctk.CTk):
         e_phone = ctk.CTkEntry(panel, width=160)
         e_phone.grid(row=1, column=3, padx=(0,8), sticky="w", pady=(8,0))
 
-        # Add / Save / Cancel buttons (inline handlers)
+        # Add Staff / Delete / Reset buttons (inline handlers)
         btn_panel = ctk.CTkFrame(panel)
         btn_panel.grid(row=0, column=4, rowspan=2, padx=(8,4), sticky="e")
 
-        def on_add():
+        def on_add_staff():
             name = e_name.get().strip()
             staff_id_opt = e_staffid.get().strip()
             position = cb_pos.get().strip()
@@ -2590,7 +2589,7 @@ class VoucherApp(ctk.CTk):
             except Exception as e:
                 messagebox.showerror("Add Staff", f"Failed to add staff:\n{e}")
                 return
-            # clear inputs and refresh table (refresh() is defined later in this method)
+            # clear inputs and refresh table (refresh() defined later)
             e_staffid.delete(0, "end")
             e_name.delete(0, "end")
             e_phone.delete(0, "end")
@@ -2600,49 +2599,54 @@ class VoucherApp(ctk.CTk):
             except Exception:
                 pass
 
-        def on_save():
-            # Save behaves like update: update currently selected tree row or update by Name
-            sel = None
-            try:
-                sel = tree.selection()
-            except Exception:
-                pass
+        def on_delete_staff():
+            """Delete staff record. Match by staff_id if provided, else by name.
+            If both provided, require both match to avoid accidental deletes."""
             name = e_name.get().strip()
             staff_id_opt = e_staffid.get().strip()
-            position = cb_pos.get().strip()
-            phone = e_phone.get().strip()
-            if not name:
-                messagebox.showerror("Missing", "Please enter Name.")
+            if not name and not staff_id_opt:
+                messagebox.showerror("Delete", "Enter Staff ID or Name to delete.")
                 return
-            now = datetime.now().isoformat(sep=" ", timespec="seconds")
+            if not messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this staff record?"):
+                return
             try:
                 conn = get_conn()
                 cur = conn.cursor()
-                # Update by name if exists; otherwise insert
-                cur.execute("SELECT id FROM staffs WHERE name=?", (name,))
-                row = cur.fetchone()
-                if row:
-                    cur.execute("""
-                        UPDATE staffs SET position=?, staff_id_opt=?, phone=?, updated_at=? WHERE name=?
-                    """, (position, staff_id_opt, phone, now, name))
+                if staff_id_opt and name:
+                    cur.execute("DELETE FROM staffs WHERE staff_id_opt=? AND name=?", (staff_id_opt, name))
+                elif staff_id_opt:
+                    cur.execute("DELETE FROM staffs WHERE staff_id_opt=?", (staff_id_opt,))
                 else:
-                    cur.execute("""
-                        INSERT INTO staffs (position, staff_id_opt, name, phone, photo_path, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (position, staff_id_opt, name, phone, "", now, now))
+                    cur.execute("DELETE FROM staffs WHERE name=?", (name,))
+                affected = cur.rowcount
                 conn.commit()
                 conn.close()
+                if affected == 0:
+                    messagebox.showinfo("Delete", "No matching staff found to delete.")
+                else:
+                    messagebox.showinfo("Delete", f"Deleted {affected} record(s).")
             except Exception as e:
-                messagebox.showerror("Save Staff", f"Failed to save staff:\n{e}")
+                messagebox.showerror("Delete Staff", f"Failed to delete staff:\n{e}")
                 return
+            # clear inputs and refresh
+            e_staffid.delete(0, "end")
+            e_name.delete(0, "end")
+            e_phone.delete(0, "end")
+            cb_pos.set("Technician")
             try:
                 refresh()
             except Exception:
                 pass
 
-        white_btn(btn_panel, text="Add", width=100, command=on_add).pack(side="top", pady=(0,6))
-        white_btn(btn_panel, text="Save", width=100, command=on_save).pack(side="top", pady=(0,6))
-        white_btn(btn_panel, text="Cancel", width=100, command=lambda: (e_staffid.delete(0,'end'), e_name.delete(0,'end'), e_phone.delete(0,'end'), cb_pos.set("Technician"))).pack(side="top")
+        def on_reset_fields():
+            e_staffid.delete(0, "end")
+            e_name.delete(0, "end")
+            e_phone.delete(0, "end")
+            cb_pos.set("Technician")
+
+        white_btn(btn_panel, text="Add Staff", width=120, command=on_add_staff).pack(side="top", pady=(0,6))
+        white_btn(btn_panel, text="Delete", width=120, command=on_delete_staff).pack(side="top", pady=(0,6))
+        white_btn(btn_panel, text="Reset", width=120, command=on_reset_fields).pack(side="top")
 
         # Row 1: Treeview container
         container = tk.Frame(frm)
