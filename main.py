@@ -2243,11 +2243,10 @@ class VoucherApp(ctk.CTk):
         toolbar.pack(fill="x", padx=8, pady=(8, 6))
 
         # Search box (shared)
-        ctk.CTkLabel(toolbar, text="Search:").pack(side="right", padx=(6,4))
         search_var = tk.StringVar()
+        ctk.CTkLabel(toolbar, text="Search:").pack(side="left", padx=(8,4))
         e_search = ctk.CTkEntry(toolbar, textvariable=search_var, width=260)
-        e_search.pack(side="right", padx=(0,8))
-        ctk.CTkLabel(toolbar, text="Search:").pack(side="right", padx=(6,4))
+        e_search.pack(side="left", padx=(0,8))
         try:
             e_search.bind("<Return>", lambda e: do_refresh())
         except Exception:
