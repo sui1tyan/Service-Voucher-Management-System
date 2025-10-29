@@ -356,6 +356,39 @@ def init_db():
     conn.commit();
     conn.close()
 
+def bind_commission_to_voucher(commission_id: int, voucher_id: str) -> None:
+    """
+    Bind an existing commission record to a voucher by setting commissions.voucher_id.
+    This will attempt to add the voucher_id column if it doesn't exist yet.
+    Raises ValueError on failures (e.g., already bound).
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    # Ensure voucher_id column exists
+    cur.execute("PRAGMA table_info(commissions)")
+    cols = [r[1] for r in cur.fetchall()]
+    if "voucher_id" not in cols:
+        try:
+            cur.execute("ALTER TABLE commissions ADD COLUMN voucher_id TEXT")
+            conn.commit()
+        except Exception:
+            # if ALTER fails, proceed but binding likely will fail later
+            logger.exception("Failed to add voucher_id column to commissions", exc_info=True)
+
+    # Fetch commission row
+    cur.execute("SELECT id, voucher_id FROM commissions WHERE id=?", (commission_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Commission record not found.")
+    _, bound_vid = row
+    if bound_vid:
+        conn.close()
+        raise ValueError("This commission record is already bound to a voucher.")
+    # Bind
+    cur.execute("UPDATE commissions SET voucher_id=?, updated_at=? WHERE id=?", (voucher_id, datetime.now().isoformat(sep=' ', timespec='seconds'), commission_id))
+    conn.commit()
+    conn.close()
 
 def _read_base_vid():
     conn = get_conn()
@@ -607,9 +640,8 @@ def add_voucher(
     tech_commission=None,
 ):
     """
-    Create voucher row and generate PDF. Also attempts to create a commission
-    record automatically when a valid ref_bill and amounts are provided.
-    All added params are optional to preserve backward compatibility.
+    Create voucher row and generate PDF. Does NOT auto-create commission row.
+    Commission binding is handled separately (see bind_commission_to_voucher).
     """
     with get_conn() as conn:
         cur = conn.cursor()
@@ -634,7 +666,7 @@ def add_voucher(
         except Exception:
             raise
 
-        # Insert DB row (include new commission-related columns)
+        # Insert DB row (include new commission-related columns if present in schema)
         try:
             cur.execute("""
                 INSERT INTO vouchers (
@@ -656,25 +688,6 @@ def add_voucher(
             except Exception:
                 pass
             raise
-
-        # Attempt to create matching commission record automatically (best-effort)
-        try:
-            # Only create commission when there is a ref_bill and a numeric amount & commission
-            if ref_bill and (amount_rm is not None) and (tech_commission is not None):
-                bill_type, bill_no = _parse_bill(ref_bill)
-                if bill_type and bill_no:
-                    # Resolve staff internal id if possible
-                    staff_db_id = _resolve_staff_db_id(technician_id, technician_name) or _resolve_staff_db_id("", staff_name)
-                    now = datetime.now().isoformat(sep=' ', timespec='seconds')
-                    # Use INSERT OR IGNORE in case commission uniqueness index triggers
-                    cur.execute("""
-                        INSERT OR IGNORE INTO commissions
-                        (staff_id, bill_type, bill_no, total_amount, commission_amount, bill_image_path, created_at, updated_at)
-                        VALUES (?,?,?,?,?,?,?,?)
-                    """, (staff_db_id, bill_type, bill_no, float(amount_rm), float(tech_commission), "", now, now))
-        except Exception:
-            # don't abort voucher creation for commission insert errors; just log
-            logger.exception("Failed to auto-create commission from voucher", exc_info=True)
 
         conn.commit()
         return voucher_id, final_pdf
@@ -1482,12 +1495,7 @@ class VoucherApp(ctk.CTk):
 
     # ---------- Add / Edit voucher ----------
     def add_voucher_ui(self):
-        """Create Voucher window — single-instance, styled like Edit UI, with:
-           - Technician ID and Technician Name separated & linked
-           - Bill type selector (CS / IV) with auto prefix CS-mmdd/ or IV-mmdd/
-           - Amount and Technician Commission fields
-           - Auto-creates commission record (handled by add_voucher)
-        """
+        """Create Voucher window — updated layout and commission-binding flow."""
         # single-instance guard
         self._open_windows = getattr(self, "_open_windows", {})
         if self._open_windows.get("add_voucher_ui"):
@@ -1509,6 +1517,7 @@ class VoucherApp(ctk.CTk):
 
         # register window
         self._open_windows["add_voucher_ui"] = top
+
         def _on_close():
             try:
                 del self._open_windows["add_voucher_ui"]
@@ -1518,20 +1527,22 @@ class VoucherApp(ctk.CTk):
                 top.destroy()
             except Exception:
                 pass
-        try:    
+
+        try:
             top.protocol("WM_DELETE_WINDOW", _on_close)
         except Exception:
             pass
-    
+
         frm = ctk.CTkFrame(top)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
         frm.grid_columnconfigure(1, weight=1)
-    
-        WIDE = 560
+
+        # Make fields shorter per your request
+        WIDE = 420   # shortened from previous 560
+        ENTRY_SHORT = 240
         SMALL = 120
         r = 0
 
-        # Helper for multiline text (same as Edit)
         def mk_text(parent, height, seed=""):
             wrap = ctk.CTkFrame(parent)
             wrap.grid_columnconfigure(0, weight=1)
@@ -1543,15 +1554,15 @@ class VoucherApp(ctk.CTk):
             sb.grid(row=0, column=1, sticky="ns")
             return wrap, txt
 
-        # --- Customer
+        # --- Customer (shorter)
         ctk.CTkLabel(frm, text="Customer Name").grid(row=r, column=0, sticky="w")
         e_name = ctk.CTkEntry(frm, width=WIDE)
-        e_name.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
+        e_name.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
 
         ctk.CTkLabel(frm, text="Contact Number").grid(row=r, column=0, sticky="w")
         e_contact = ctk.CTkEntry(frm, width=WIDE)
-        e_contact.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
+        e_contact.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
 
         ctk.CTkLabel(frm, text="No. of Units").grid(row=r, column=0, sticky="w")
@@ -1560,31 +1571,31 @@ class VoucherApp(ctk.CTk):
         e_units.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
 
-        # Particulars & Problem
+        # Particulars (shorter)
         ctk.CTkLabel(frm, text="Particulars").grid(row=r, column=0, sticky="nw")
         part_wrap, t_part = mk_text(frm, height=3)
         part_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6)
         r += 1
 
+        # Problem (shorter)
         ctk.CTkLabel(frm, text="Problem").grid(row=r, column=0, sticky="nw")
         prob_wrap, t_prob = mk_text(frm, height=3)
         prob_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6)
         r += 1
 
-        # Recipient (staff selection for pickup person)
+        # Recipient (shorter)
         ctk.CTkLabel(frm, text="Recipient").grid(row=r, column=0, sticky="w")
         try:
             staff_values = list_staffs_names()
         except Exception:
             staff_values = []
         staff_values = (["— Select —"] + staff_values) if staff_values else ["— Select —"]
-        e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
+        e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=ENTRY_SHORT)
         e_recipient.set(staff_values[0])
         e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
 
-        # ---------------- Technician ID and Technician Name (separate, linked) ----------------
-        # Prepare mappings
+        # ---------------- Technician ID and Technician Name separated vertically ----------------
         tech_id_values = ["— Select —"]
         tech_name_values = ["— Select —"]
         id_to_name = {}
@@ -1596,71 +1607,48 @@ class VoucherApp(ctk.CTk):
             tech_rows = cur.fetchall()
             conn.close()
             for sid_opt, nm in tech_rows:
-                # only include non-empty IDs in id dropdown; name list always includes name
                 if sid_opt and sid_opt.strip():
                     tech_id_values.append(sid_opt)
                     id_to_name[sid_opt] = nm
                 tech_name_values.append(nm)
                 name_to_id[nm] = sid_opt or ""
         except Exception:
-            # leave defaults
             pass
 
-        # Technician ID
+        # Technician ID (row)
         ctk.CTkLabel(frm, text="Technician ID").grid(row=r, column=0, sticky="w")
         cb_tech_id = ctk.CTkComboBox(frm, values=tech_id_values, width=200)
         cb_tech_id.set(tech_id_values[0])
-        cb_tech_id.grid(row=r, column=1, sticky="w", padx=(10,0), pady=6)
-
-        # Technician Name
-        ctk.CTkLabel(frm, text="Technician Name").grid(row=r, column=1, sticky="e", padx=(0,220))
-        cb_tech_name = ctk.CTkComboBox(frm, values=tech_name_values, width=300)
-        cb_tech_name.set(tech_name_values[0])
-        # place name selector to the right of id selector visually
-        cb_tech_name.grid(row=r, column=1, sticky="w", padx=(220,10), pady=6)
+        cb_tech_id.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
 
-        # Link the two selectors: selecting one updates the other
+        # Technician Name (placed under ID)
+        ctk.CTkLabel(frm, text="Technician Name").grid(row=r, column=0, sticky="w")
+        cb_tech_name = ctk.CTkComboBox(frm, values=tech_name_values, width=300)
+        cb_tech_name.set(tech_name_values[0])
+        cb_tech_name.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+        r += 1
+
         def _on_tech_id_change(new=None):
             sel = cb_tech_id.get().strip()
             if not sel or sel == "— Select —":
-                # clear name selection
-                try:
-                    cb_tech_name.set("— Select —")
-                except Exception:
-                    pass
+                cb_tech_name.set("— Select —")
                 return
-            # find name bound to id
             nm = id_to_name.get(sel, "")
             if nm:
-                try:
-                    cb_tech_name.set(nm)
-                except Exception:
-                    pass
+                cb_tech_name.set(nm)
 
         def _on_tech_name_change(new=None):
             sel = cb_tech_name.get().strip()
             if not sel or sel == "— Select —":
-                try:
-                    cb_tech_id.set("— Select —")
-                except Exception:
-                    pass
+                cb_tech_id.set("— Select —")
                 return
             sid = name_to_id.get(sel, "")
             if sid:
-                try:
-                    cb_tech_id.set(sid)
-                except Exception:
-                    pass
+                cb_tech_id.set(sid)
             else:
-                # If no staff_id_opt registered, leave ID as "— Select —"
-                try:
-                    cb_tech_id.set("— Select —")
-                except Exception:
-                    pass
+                cb_tech_id.set("— Select —")
 
-        # Bind to value change — CustomTkinter ComboBox doesn't provide direct callback,
-        # but we can bind focusout or use trace on underlying variable if available.
         try:
             cb_tech_id.configure(command=_on_tech_id_change)
         except Exception:
@@ -1670,58 +1658,34 @@ class VoucherApp(ctk.CTk):
         except Exception:
             cb_tech_name.bind("<<ComboboxSelected>>", lambda e: _on_tech_name_change())
 
-        # ---------------- Bill Type & Bill No (ref_bill) ----------------
-        r += 0
+        # ---------------- Bill Type & Bill No (Bill no under Bill Type) ----------------
         ctk.CTkLabel(frm, text="Bill Type").grid(row=r, column=0, sticky="w")
-        bill_type_cb = ctk.CTkComboBox(frm, values=["CS", "IV"], width=120)
+        bill_type_cb = ctk.CTkComboBox(frm, values=["CS", "IV", "None"], width=120)
         bill_type_cb.set("CS")
         bill_type_cb.grid(row=r, column=1, sticky="w", padx=10, pady=6)
-
-        ctk.CTkLabel(frm, text="Bill No (ref_bill)").grid(row=r, column=1, sticky="e", padx=(0,260))
-        e_ref_bill = ctk.CTkEntry(frm, width=280)
-        # auto prefix will be filled shortly
-        e_ref_bill.grid(row=r, column=1, sticky="w", padx=(260,10), pady=6)
         r += 1
 
-        # Update e_ref_bill prefix based on bill type and today's month/day
-        def _update_ref_prefix(_=None):
-            bt = (bill_type_cb.get() or "CS").strip().upper()
-            today = datetime.now()
-            mm = f"{today.month:02d}"
-            dd = f"{today.day:02d}"
-            prefix = f"{bt}-{mm}{dd}/"
-            # If entry is empty or currently begins with a previous prefix, replace
-            curv = (e_ref_bill.get() or "").strip()
-            if not curv or re.match(r"^(CS|IV)-\d{4}/", curv, re.IGNORECASE):
-                try:
-                    e_ref_bill.delete(0, "end")
-                    e_ref_bill.insert(0, prefix)
-                except Exception:
-                    pass
-
-        # bind change
-        try:
-            bill_type_cb.configure(command=_update_ref_prefix)
-        except Exception:
-            bill_type_cb.bind("<<ComboboxSelected>>", lambda e: _update_ref_prefix())
-        # initial prefix
-        _update_ref_prefix()
+        # Bill No placed under Bill Type
+        ctk.CTkLabel(frm, text="Bill No (ref_bill)").grid(row=r, column=0, sticky="w")
+        e_ref_bill = ctk.CTkEntry(frm, width=ENTRY_SHORT)
+        e_ref_bill.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+        r += 1
 
         # Bill Date (optional)
         ctk.CTkLabel(frm, text="Bill Date (DD-MM-YYYY)").grid(row=r, column=0, sticky="w")
         e_ref_bill_date = ctk.CTkEntry(frm, width=180)
         e_ref_bill_date.insert(0, _to_ui_date(datetime.now()))
-        e_ref_bill_date.grid(row=r, column=1, sticky="w", padx=(10,0), pady=6)
+        e_ref_bill_date.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
 
-        # Amount and Technician Commission
+        # Amount and Commission amount on same row (Commission label before its textbox)
         ctk.CTkLabel(frm, text="Amount (Total)").grid(row=r, column=0, sticky="w")
         e_amount = ctk.CTkEntry(frm, width=180)
         e_amount.grid(row=r, column=1, sticky="w", padx=(10,0), pady=6)
 
-        ctk.CTkLabel(frm, text="Technician Commission").grid(row=r, column=1, sticky="e", padx=(0,260))
-        e_tech_comm = ctk.CTkEntry(frm, width=180)
-        e_tech_comm.grid(row=r, column=1, sticky="w", padx=(260,10), pady=6)
+        ctk.CTkLabel(frm, text="Commission amount").grid(row=r, column=1, sticky="w", padx=(220,0))
+        e_tech_comm = ctk.CTkEntry(frm, width=140)
+        e_tech_comm.grid(row=r, column=1, sticky="w", padx=(340,10), pady=6)
         r += 1
 
         # Status
@@ -1732,11 +1696,43 @@ class VoucherApp(ctk.CTk):
         cb_status.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
 
-        # Solution
+        # Solution (shorter)
         ctk.CTkLabel(frm, text="Solution").grid(row=r, column=0, sticky="nw")
         sol_wrap, t_sol = mk_text(frm, height=3)
         sol_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6)
         r += 1
+
+        # Behavior: when bill type is "None", disable bill no entry
+        def _on_bill_type_change(*_a):
+            bt = (bill_type_cb.get() or "").strip().upper()
+            if bt == "NONE":
+                try:
+                    e_ref_bill.delete(0, "end")
+                    e_ref_bill.configure(state="disabled")
+                    e_ref_bill_date.configure(state="disabled")
+                except Exception:
+                    pass
+            else:
+                try:
+                    e_ref_bill.configure(state="normal")
+                    e_ref_bill_date.configure(state="normal")
+                    # auto prefix if empty or old prefix
+                    today = datetime.now()
+                    mm = f"{today.month:02d}"
+                    dd = f"{today.day:02d}"
+                    prefix = f"{bt}-{mm}{dd}/"
+                    curv = (e_ref_bill.get() or "").strip().upper()
+                    if not curv or re.match(r"^(CS|IV)-\d{4}/", curv, re.IGNORECASE):
+                        e_ref_bill.delete(0, "end")
+                        e_ref_bill.insert(0, prefix)
+                except Exception:
+                    pass
+
+        try:
+            bill_type_cb.configure(command=_on_bill_type_change)
+        except Exception:
+            bill_type_cb.bind("<<ComboboxSelected>>", lambda e: _on_bill_type_change())
+        _on_bill_type_change()
 
         # Buttons
         btns = ctk.CTkFrame(top)
@@ -1745,7 +1741,7 @@ class VoucherApp(ctk.CTk):
         def save():
             name = e_name.get().strip()
             contact = e_contact.get().strip()
-            try:    
+            try:
                 units = int((e_units.get() or "1").strip())
                 if units <= 0:
                     raise ValueError
@@ -1773,15 +1769,14 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Missing", "Customer name and contact are required.")
                 return
 
-            # ref_bill construction & validation (we keep using CS and IV scheme)
+            # Bill handling
+            bt = (bill_type_cb.get() or "None").strip().upper()
             raw_ref = (e_ref_bill.get() or "").strip().upper()
             ref_bill_val = raw_ref if raw_ref else None
-
-            # ref_bill_date conversion to SQL format (YYYY-MM-DD)
             raw_date = (e_ref_bill_date.get() or "").strip()
             ref_bill_date_sql = _from_ui_date_to_sqldate(raw_date)
 
-            # parse amounts
+            # amounts
             amount_val = None
             tech_comm_val = None
             if (e_amount.get() or "").strip():
@@ -1794,7 +1789,23 @@ class VoucherApp(ctk.CTk):
                 try:
                     tech_comm_val = float(e_tech_comm.get().strip())
                 except Exception:
-                    messagebox.showerror("Invalid", "Technician Commission must be a number.")
+                    messagebox.showerror("Invalid", "Commission amount must be a number.")
+                    return
+
+            # If bill type is not NONE and a bill no is provided, verify commission record exists and not already bound
+            commission_row = None
+            if bt != "NONE" and ref_bill_val:
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute("SELECT id, voucher_id FROM commissions WHERE bill_type=? AND LOWER(bill_no)=LOWER(?)", (bt, ref_bill_val))
+                commission_row = cur.fetchone()
+                conn.close()
+                if not commission_row:
+                    messagebox.showerror("Missing Commission", "The commission record does not exist. Please choose 'None' at bill type option.")
+                    return
+                comm_id, bound_vid = commission_row
+                if bound_vid:
+                    messagebox.showerror("Already Bound", "The commission record has already been bound to another voucher.")
                     return
 
             # call add_voucher (new signature)
@@ -1802,7 +1813,7 @@ class VoucherApp(ctk.CTk):
                 voucher_id, _ = add_voucher(
                     name, contact, units,
                     particulars, problem,
-                    recipient,  # staff_name parameter used here to keep previous behavior
+                    recipient,  # staff_name param
                     recipient,
                     solution, technician_id, technician_name,
                     status=cb_status.get().strip(),
@@ -1811,11 +1822,21 @@ class VoucherApp(ctk.CTk):
                     amount_rm=amount_val,
                     tech_commission=tech_comm_val,
                 )
-                messagebox.showinfo("Saved", f"Voucher {voucher_id} created.")
             except Exception as ex:
                 messagebox.showerror("Save Failed", f"Failed to create voucher:\n{ex}")
                 return
 
+            # If a commission row was found earlier, bind it to this voucher (set commissions.voucher_id)
+            if commission_row:
+                try:
+                    comm_id = commission_row[0]
+                    bind_commission_to_voucher(comm_id, voucher_id)
+                except Exception as e:
+                    # rollback binding failure: notify user but voucher has been created
+                    logger.exception("Failed binding commission after voucher creation", exc_info=e)
+                    messagebox.showwarning("Bound Failed", f"Voucher created ({voucher_id}) but failed to bind commission: {e}")
+
+            messagebox.showinfo("Saved", f"Voucher {voucher_id} created.")
             # close and refresh parent
             try:
                 _on_close()
