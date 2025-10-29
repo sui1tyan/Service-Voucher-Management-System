@@ -601,18 +601,27 @@ def add_voucher(
     technician_id="",
     technician_name="",
     status=None,   # <-- NEW
+    ref_bill=None,
+    ref_bill_date=None,
+    amount_rm=None,
+    tech_commission=None,
 ):
+    """
+    Create voucher row and generate PDF. Also attempts to create a commission
+    record automatically when a valid ref_bill and amounts are provided.
+    All added params are optional to preserve backward compatibility.
+    """
     with get_conn() as conn:
         cur = conn.cursor()
         voucher_id = next_voucher_id()
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        status = status or "Pending"   # <-- NEW: default if not provided
+        status = status or "Pending"   # default if not provided
 
-        # Generate to a temp name first
+        # Generate to a temp name first (keeps previous safety logic)
         final_pdf = os.path.join(PDF_DIR, f"voucher_{voucher_id}.pdf")
         temp_pdf  = final_pdf + ".part"
         try:
-            # generate to temp
+            # generate to temp to ensure writeable directory etc
             c = rl_canvas.Canvas(temp_pdf, pagesize=A4)
             c.showPage(); c.save()
             os.remove(temp_pdf)
@@ -622,27 +631,53 @@ def add_voucher(
             )
             if pdf_path != final_pdf and os.path.exists(pdf_path):
                 final_pdf = pdf_path
-        except Exception as e:
+        except Exception:
             raise
 
-        # Insert DB row
+        # Insert DB row (include new commission-related columns)
         try:
             cur.execute("""
-                INSERT INTO vouchers (voucher_id, created_at, customer_name, contact_number, units,
-                                      particulars, problem, staff_name, status, recipient, solution, pdf_path,
-                                      technician_id, technician_name)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (voucher_id, created_at, customer_name, contact_number, units, particulars, problem, staff_name,
-                  status, recipient, solution, final_pdf, technician_id, technician_name))
+                INSERT INTO vouchers (
+                    voucher_id, created_at, customer_name, contact_number, units,
+                    particulars, problem, staff_name, status, recipient, solution, pdf_path,
+                    technician_id, technician_name, ref_bill, ref_bill_date, amount_rm, tech_commission
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                voucher_id, created_at, customer_name, contact_number, units,
+                particulars, problem, staff_name, status, recipient, solution, final_pdf,
+                technician_id, technician_name, ref_bill or "", ref_bill_date or "", amount_rm if amount_rm is not None else None,
+                tech_commission if tech_commission is not None else None
+            ))
         except Exception:
+            # cleanup PDF in case of failure
             try:
                 if os.path.exists(final_pdf): os.remove(final_pdf)
             except Exception:
                 pass
             raise
+
+        # Attempt to create matching commission record automatically (best-effort)
+        try:
+            # Only create commission when there is a ref_bill and a numeric amount & commission
+            if ref_bill and (amount_rm is not None) and (tech_commission is not None):
+                bill_type, bill_no = _parse_bill(ref_bill)
+                if bill_type and bill_no:
+                    # Resolve staff internal id if possible
+                    staff_db_id = _resolve_staff_db_id(technician_id, technician_name) or _resolve_staff_db_id("", staff_name)
+                    now = datetime.now().isoformat(sep=' ', timespec='seconds')
+                    # Use INSERT OR IGNORE in case commission uniqueness index triggers
+                    cur.execute("""
+                        INSERT OR IGNORE INTO commissions
+                        (staff_id, bill_type, bill_no, total_amount, commission_amount, bill_image_path, created_at, updated_at)
+                        VALUES (?,?,?,?,?,?,?,?)
+                    """, (staff_db_id, bill_type, bill_no, float(amount_rm), float(tech_commission), "", now, now))
+        except Exception:
+            # don't abort voucher creation for commission insert errors; just log
+            logger.exception("Failed to auto-create commission from voucher", exc_info=True)
+
+        conn.commit()
         return voucher_id, final_pdf
-
-
 
 def update_voucher_fields(voucher_id, **fields):
     if not fields: return
@@ -1447,10 +1482,13 @@ class VoucherApp(ctk.CTk):
 
     # ---------- Add / Edit voucher ----------
     def add_voucher_ui(self):
-        """Create Voucher window — single-instance, fixed size, no horizontal scrollbars,
-        shortened entry widths, and textboxes wrapped to remove horizontal sliders.
+        """Create Voucher window — single-instance, styled like Edit UI, with:
+           - Technician ID and Technician Name separated & linked
+           - Bill type selector (CS / IV) with auto prefix CS-mmdd/ or IV-mmdd/
+           - Amount and Technician Commission fields
+           - Auto-creates commission record (handled by add_voucher)
         """
-        # --- single-instance guard ---
+        # single-instance guard
         self._open_windows = getattr(self, "_open_windows", {})
         if self._open_windows.get("add_voucher_ui"):
             try:
@@ -1463,16 +1501,13 @@ class VoucherApp(ctk.CTk):
             except Exception:
                 self._open_windows.pop("add_voucher_ui", None)
 
-        # --- create toplevel window ---
         top = ctk.CTkToplevel(self)
         top.title("Create Voucher")
-        # fixed size (adjust numbers if you want a different constant)
-        TOP_WIDTH, TOP_HEIGHT = 720, 620
-        top.geometry(f"{TOP_WIDTH}x{TOP_HEIGHT}")
+        top.geometry("980x780")
         top.resizable(False, False)
         top.grab_set()
 
-        # register window for single-instance behavior
+        # register window
         self._open_windows["add_voucher_ui"] = top
         def _on_close():
             try:
@@ -1483,126 +1518,234 @@ class VoucherApp(ctk.CTk):
                 top.destroy()
             except Exception:
                 pass
-        try:
+        try:    
             top.protocol("WM_DELETE_WINDOW", _on_close)
         except Exception:
             pass
     
-        # --- main frame and grid layout ---
         frm = ctk.CTkFrame(top)
-        frm.pack(fill="both", expand=True, padx=12, pady=8)
-        # columns: 0 -> labels (auto), 1 -> inputs (expand)
-        frm.grid_columnconfigure(0, weight=0)
+        frm.pack(fill="both", expand=True, padx=12, pady=12)
         frm.grid_columnconfigure(1, weight=1)
     
-        # Common widths (status width used as baseline)
-        STATUS_WIDTH = 240   # chosen baseline; adjust if you prefer different
-        ENTRY_SHORT = STATUS_WIDTH  # customer/contact/recipient/technician
-        SMALL_WIDTH = 120
-    
-        # --- helpers ---
-        def mk_text(parent, height_lines=4):
-            """Create a wrapped Text with vertical scrollbar only (no horizontal)."""
-            wrap_frame = ctk.CTkFrame(parent)
-            wrap_frame.grid_columnconfigure(0, weight=1)
-            # use tk.Text for multi-line and control wrap
-            txt = tk.Text(wrap_frame, height=height_lines, font=(FONT_FAMILY, UI_FONT_SIZE), wrap='word')
-            vsb = ttk.Scrollbar(wrap_frame, orient="vertical", command=txt.yview)
-            txt.configure(yscrollcommand=vsb.set)
-            txt.grid(row=0, column=0, sticky="nsew")
-            vsb.grid(row=0, column=1, sticky="ns")
-            return wrap_frame, txt
-    
+        WIDE = 560
+        SMALL = 120
         r = 0
-    
-        # Customer Name
-        ctk.CTkLabel(frm, text="Customer Name").grid(row=r, column=0, sticky="w", padx=(4,8), pady=6)
-        e_name = ctk.CTkEntry(frm, width=ENTRY_SHORT)
-        e_name.grid(row=r, column=1, sticky="w", padx=(0,12), pady=6)
-        r += 1
-    
-        # Contact Number
-        ctk.CTkLabel(frm, text="Contact Number").grid(row=r, column=0, sticky="w", padx=(4,8), pady=6)
-        e_contact = ctk.CTkEntry(frm, width=ENTRY_SHORT)
-        e_contact.grid(row=r, column=1, sticky="w", padx=(0,12), pady=6)
+
+        # Helper for multiline text (same as Edit)
+        def mk_text(parent, height, seed=""):
+            wrap = ctk.CTkFrame(parent)
+            wrap.grid_columnconfigure(0, weight=1)
+            txt = tk.Text(wrap, height=height, font=(FONT_FAMILY, UI_FONT_SIZE), wrap='word')
+            txt.insert("1.0", seed)
+            sb = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview)
+            txt.configure(yscrollcommand=sb.set)
+            txt.grid(row=0, column=0, sticky="nsew")
+            sb.grid(row=0, column=1, sticky="ns")
+            return wrap, txt
+
+        # --- Customer
+        ctk.CTkLabel(frm, text="Customer Name").grid(row=r, column=0, sticky="w")
+        e_name = ctk.CTkEntry(frm, width=WIDE)
+        e_name.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
         r += 1
 
-        # No. of Units (kept small)
-        ctk.CTkLabel(frm, text="No. of Units").grid(row=r, column=0, sticky="w", padx=(4,8), pady=6)
-        e_units = ctk.CTkEntry(frm, width=SMALL_WIDTH)
+        ctk.CTkLabel(frm, text="Contact Number").grid(row=r, column=0, sticky="w")
+        e_contact = ctk.CTkEntry(frm, width=WIDE)
+        e_contact.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
+        r += 1
+
+        ctk.CTkLabel(frm, text="No. of Units").grid(row=r, column=0, sticky="w")
+        e_units = ctk.CTkEntry(frm, width=SMALL)
         e_units.insert(0, "1")
-        e_units.grid(row=r, column=1, sticky="w", padx=(0,12), pady=6)
+        e_units.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
-    
-        # Particulars (multi-line) — match length with recipient (uses available column width)
-        ctk.CTkLabel(frm, text="Particulars").grid(row=r, column=0, sticky="nw", padx=(4,8), pady=6)
-        part_wrap, t_part = mk_text(frm, height_lines=3)
-        part_wrap.grid(row=r, column=1, sticky="nsew", padx=(0,12), pady=6)
+
+        # Particulars & Problem
+        ctk.CTkLabel(frm, text="Particulars").grid(row=r, column=0, sticky="nw")
+        part_wrap, t_part = mk_text(frm, height=3)
+        part_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6)
         r += 1
-    
-        # Problem (multi-line)
-        ctk.CTkLabel(frm, text="Problem").grid(row=r, column=0, sticky="nw", padx=(4,8), pady=6)
-        prob_wrap, t_prob = mk_text(frm, height_lines=3)
-        prob_wrap.grid(row=r, column=1, sticky="nsew", padx=(0,12), pady=6)
+
+        ctk.CTkLabel(frm, text="Problem").grid(row=r, column=0, sticky="nw")
+        prob_wrap, t_prob = mk_text(frm, height=3)
+        prob_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6)
         r += 1
-    
-        # Recipient (combo)
-        ctk.CTkLabel(frm, text="Recipient").grid(row=r, column=0, sticky="w", padx=(4,8), pady=6)
-        # list_staffs_names() should return list of names; keep a safe default
+
+        # Recipient (staff selection for pickup person)
+        ctk.CTkLabel(frm, text="Recipient").grid(row=r, column=0, sticky="w")
         try:
             staff_values = list_staffs_names()
         except Exception:
             staff_values = []
         staff_values = (["— Select —"] + staff_values) if staff_values else ["— Select —"]
-        e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=ENTRY_SHORT)
+        e_recipient = ctk.CTkComboBox(frm, values=staff_values, width=WIDE)
         e_recipient.set(staff_values[0])
-        e_recipient.grid(row=r, column=1, sticky="w", padx=(0,12), pady=6)
+        e_recipient.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
-    
-        # Technician (in charge) (combo)
-        ctk.CTkLabel(frm, text="Technician (in charge)").grid(row=r, column=0, sticky="w", padx=(4,8), pady=6)
-        # populate tech list from DB (keep robust)
-        tech_values = ["— Select —"]
-        tech_map = {}
+
+        # ---------------- Technician ID and Technician Name (separate, linked) ----------------
+        # Prepare mappings
+        tech_id_values = ["— Select —"]
+        tech_name_values = ["— Select —"]
+        id_to_name = {}
+        name_to_id = {}
         try:
             conn = get_conn()
             cur = conn.cursor()
             cur.execute("SELECT staff_id_opt, name FROM staffs ORDER BY name COLLATE NOCASE")
             tech_rows = cur.fetchall()
             conn.close()
-            for sid, nm in tech_rows:
-                label = f"{sid}: {nm}" if sid else nm
-                tech_values.append(label)
-                tech_map[label] = (sid, nm)
+            for sid_opt, nm in tech_rows:
+                # only include non-empty IDs in id dropdown; name list always includes name
+                if sid_opt and sid_opt.strip():
+                    tech_id_values.append(sid_opt)
+                    id_to_name[sid_opt] = nm
+                tech_name_values.append(nm)
+                name_to_id[nm] = sid_opt or ""
         except Exception:
-            tech_values = ["— Select —"]
-        cb_tech = ctk.CTkComboBox(frm, values=tech_values, width=ENTRY_SHORT)
-        cb_tech.set(tech_values[0])
-        cb_tech.grid(row=r, column=1, sticky="w", padx=(0,12), pady=6)
+            # leave defaults
+            pass
+
+        # Technician ID
+        ctk.CTkLabel(frm, text="Technician ID").grid(row=r, column=0, sticky="w")
+        cb_tech_id = ctk.CTkComboBox(frm, values=tech_id_values, width=200)
+        cb_tech_id.set(tech_id_values[0])
+        cb_tech_id.grid(row=r, column=1, sticky="w", padx=(10,0), pady=6)
+
+        # Technician Name
+        ctk.CTkLabel(frm, text="Technician Name").grid(row=r, column=1, sticky="e", padx=(0,220))
+        cb_tech_name = ctk.CTkComboBox(frm, values=tech_name_values, width=300)
+        cb_tech_name.set(tech_name_values[0])
+        # place name selector to the right of id selector visually
+        cb_tech_name.grid(row=r, column=1, sticky="w", padx=(220,10), pady=6)
         r += 1
-    
-        # Status (combo) — baseline width
-        ctk.CTkLabel(frm, text="Status").grid(row=r, column=0, sticky="w", padx=(4,8), pady=6)
+
+        # Link the two selectors: selecting one updates the other
+        def _on_tech_id_change(new=None):
+            sel = cb_tech_id.get().strip()
+            if not sel or sel == "— Select —":
+                # clear name selection
+                try:
+                    cb_tech_name.set("— Select —")
+                except Exception:
+                    pass
+                return
+            # find name bound to id
+            nm = id_to_name.get(sel, "")
+            if nm:
+                try:
+                    cb_tech_name.set(nm)
+                except Exception:
+                    pass
+
+        def _on_tech_name_change(new=None):
+            sel = cb_tech_name.get().strip()
+            if not sel or sel == "— Select —":
+                try:
+                    cb_tech_id.set("— Select —")
+                except Exception:
+                    pass
+                return
+            sid = name_to_id.get(sel, "")
+            if sid:
+                try:
+                    cb_tech_id.set(sid)
+                except Exception:
+                    pass
+            else:
+                # If no staff_id_opt registered, leave ID as "— Select —"
+                try:
+                    cb_tech_id.set("— Select —")
+                except Exception:
+                    pass
+
+        # Bind to value change — CustomTkinter ComboBox doesn't provide direct callback,
+        # but we can bind focusout or use trace on underlying variable if available.
+        try:
+            cb_tech_id.configure(command=_on_tech_id_change)
+        except Exception:
+            cb_tech_id.bind("<<ComboboxSelected>>", lambda e: _on_tech_id_change())
+        try:
+            cb_tech_name.configure(command=_on_tech_name_change)
+        except Exception:
+            cb_tech_name.bind("<<ComboboxSelected>>", lambda e: _on_tech_name_change())
+
+        # ---------------- Bill Type & Bill No (ref_bill) ----------------
+        r += 0
+        ctk.CTkLabel(frm, text="Bill Type").grid(row=r, column=0, sticky="w")
+        bill_type_cb = ctk.CTkComboBox(frm, values=["CS", "IV"], width=120)
+        bill_type_cb.set("CS")
+        bill_type_cb.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+
+        ctk.CTkLabel(frm, text="Bill No (ref_bill)").grid(row=r, column=1, sticky="e", padx=(0,260))
+        e_ref_bill = ctk.CTkEntry(frm, width=280)
+        # auto prefix will be filled shortly
+        e_ref_bill.grid(row=r, column=1, sticky="w", padx=(260,10), pady=6)
+        r += 1
+
+        # Update e_ref_bill prefix based on bill type and today's month/day
+        def _update_ref_prefix(_=None):
+            bt = (bill_type_cb.get() or "CS").strip().upper()
+            today = datetime.now()
+            mm = f"{today.month:02d}"
+            dd = f"{today.day:02d}"
+            prefix = f"{bt}-{mm}{dd}/"
+            # If entry is empty or currently begins with a previous prefix, replace
+            curv = (e_ref_bill.get() or "").strip()
+            if not curv or re.match(r"^(CS|IV)-\d{4}/", curv, re.IGNORECASE):
+                try:
+                    e_ref_bill.delete(0, "end")
+                    e_ref_bill.insert(0, prefix)
+                except Exception:
+                    pass
+
+        # bind change
+        try:
+            bill_type_cb.configure(command=_update_ref_prefix)
+        except Exception:
+            bill_type_cb.bind("<<ComboboxSelected>>", lambda e: _update_ref_prefix())
+        # initial prefix
+        _update_ref_prefix()
+
+        # Bill Date (optional)
+        ctk.CTkLabel(frm, text="Bill Date (DD-MM-YYYY)").grid(row=r, column=0, sticky="w")
+        e_ref_bill_date = ctk.CTkEntry(frm, width=180)
+        e_ref_bill_date.insert(0, _to_ui_date(datetime.now()))
+        e_ref_bill_date.grid(row=r, column=1, sticky="w", padx=(10,0), pady=6)
+        r += 1
+
+        # Amount and Technician Commission
+        ctk.CTkLabel(frm, text="Amount (Total)").grid(row=r, column=0, sticky="w")
+        e_amount = ctk.CTkEntry(frm, width=180)
+        e_amount.grid(row=r, column=1, sticky="w", padx=(10,0), pady=6)
+
+        ctk.CTkLabel(frm, text="Technician Commission").grid(row=r, column=1, sticky="e", padx=(0,260))
+        e_tech_comm = ctk.CTkEntry(frm, width=180)
+        e_tech_comm.grid(row=r, column=1, sticky="w", padx=(260,10), pady=6)
+        r += 1
+
+        # Status
+        ctk.CTkLabel(frm, text="Status").grid(row=r, column=0, sticky="w")
         status_choices = ["Pending", "Completed", "Deleted", "1st call", "2nd reminder", "3rd reminder"]
-        cb_status = ctk.CTkComboBox(frm, values=status_choices, width=STATUS_WIDTH)
+        cb_status = ctk.CTkComboBox(frm, values=status_choices, width=200)
         cb_status.set("Pending")
-        cb_status.grid(row=r, column=1, sticky="w", padx=(0,12), pady=6)
+        cb_status.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
-    
-        # Solution (multi-line)
-        ctk.CTkLabel(frm, text="Solution").grid(row=r, column=0, sticky="nw", padx=(4,8), pady=6)
-        sol_wrap, t_sol = mk_text(frm, height_lines=3)
-        sol_wrap.grid(row=r, column=1, sticky="nsew", padx=(0,12), pady=6)
+
+        # Solution
+        ctk.CTkLabel(frm, text="Solution").grid(row=r, column=0, sticky="nw")
+        sol_wrap, t_sol = mk_text(frm, height=3)
+        sol_wrap.grid(row=r, column=1, sticky="nsew", padx=10, pady=6)
         r += 1
-    
-        # Buttons frame (bottom) — ensure visible and aligned
+
+        # Buttons
         btns = ctk.CTkFrame(top)
         btns.pack(fill="x", padx=12, pady=(6, 12))
-        # Save handler
+
         def save():
             name = e_name.get().strip()
             contact = e_contact.get().strip()
-            try:
+            try:    
                 units = int((e_units.get() or "1").strip())
                 if units <= 0:
                     raise ValueError
@@ -1616,43 +1759,80 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Missing", "Please choose a Recipient.")
                 return
             solution = t_sol.get("1.0", "end").strip()
-            sel = cb_tech.get().strip()
-            if sel in ("— Select —", ""):
+
+            # Technician resolution
+            tech_id_sel = cb_tech_id.get().strip()
+            tech_name_sel = cb_tech_name.get().strip()
+            if tech_id_sel in ("— Select —", "") and tech_name_sel in ("— Select —", ""):
                 messagebox.showerror("Missing", "Please select a Technician in charge.")
                 return
-            technician_id, technician_name = tech_map.get(sel, ("", ""))
+            technician_id = tech_id_sel if tech_id_sel not in ("— Select —", "") else ""
+            technician_name = tech_name_sel if tech_name_sel not in ("— Select —", "") else ""
+
             if not name or not contact:
                 messagebox.showerror("Missing", "Customer name and contact are required.")
                 return
 
-            # call your existing add_voucher function (preserves current DB logic)
-            voucher_id, _ = add_voucher(
-                name, contact, units,
-                particulars, problem,
-                recipient, recipient,
-                solution, technician_id, technician_name,
-                status=cb_status.get().strip()
-            )
-            messagebox.showinfo("Saved", f"Voucher {voucher_id} created.")
-            # close and refresh search/list in parent
+            # ref_bill construction & validation (we keep using CS and IV scheme)
+            raw_ref = (e_ref_bill.get() or "").strip().upper()
+            ref_bill_val = raw_ref if raw_ref else None
+
+            # ref_bill_date conversion to SQL format (YYYY-MM-DD)
+            raw_date = (e_ref_bill_date.get() or "").strip()
+            ref_bill_date_sql = _from_ui_date_to_sqldate(raw_date)
+
+            # parse amounts
+            amount_val = None
+            tech_comm_val = None
+            if (e_amount.get() or "").strip():
+                try:
+                    amount_val = float(e_amount.get().strip())
+                except Exception:
+                    messagebox.showerror("Invalid", "Amount must be a number.")
+                    return
+            if (e_tech_comm.get() or "").strip():
+                try:
+                    tech_comm_val = float(e_tech_comm.get().strip())
+                except Exception:
+                    messagebox.showerror("Invalid", "Technician Commission must be a number.")
+                    return
+
+            # call add_voucher (new signature)
+            try:
+                voucher_id, _ = add_voucher(
+                    name, contact, units,
+                    particulars, problem,
+                    recipient,  # staff_name parameter used here to keep previous behavior
+                    recipient,
+                    solution, technician_id, technician_name,
+                    status=cb_status.get().strip(),
+                    ref_bill=ref_bill_val,
+                    ref_bill_date=ref_bill_date_sql,
+                    amount_rm=amount_val,
+                    tech_commission=tech_comm_val,
+                )
+                messagebox.showinfo("Saved", f"Voucher {voucher_id} created.")
+            except Exception as ex:
+                messagebox.showerror("Save Failed", f"Failed to create voucher:\n{ex}")
+                return
+
+            # close and refresh parent
             try:
                 _on_close()
             except Exception:
-                try: top.destroy()
-                except Exception: pass
+                try:
+                    top.destroy()
+                except Exception:
+                    pass
             try:
                 self.perform_search()
             except Exception:
                 pass
-    
-        # Right-aligned Save button
+
         white_btn(btns, text="Save", command=save, width=140).pack(side="right")
-        # Optional Cancel button
         white_btn(btns, text="Cancel", command=_on_close, width=100).pack(side="right", padx=(0,8))
-    
-        # Final layout tweaks: ensure the frame expands properly and no widget is cropped
+
         try:
-            # force initial geometry to ensure widgets compute correct sizes (helps some platforms)
             top.update_idletasks()
         except Exception:
             pass
