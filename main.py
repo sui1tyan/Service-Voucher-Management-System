@@ -640,20 +640,20 @@ def add_voucher(
     tech_commission=None,
 ):
     """
-    Create voucher row and generate PDF. Does NOT auto-create commission row.
-    Commission binding is handled separately (see bind_commission_to_voucher).
+    Create voucher row and generate PDF. Robust INSERT: detect which columns
+    exist in the vouchers table and only insert those columns to avoid schema
+    mismatch errors on older DBs.
     """
     with get_conn() as conn:
         cur = conn.cursor()
         voucher_id = next_voucher_id()
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        status = status or "Pending"   # default if not provided
+        status = status or "Pending"
 
         # Generate to a temp name first (keeps previous safety logic)
         final_pdf = os.path.join(PDF_DIR, f"voucher_{voucher_id}.pdf")
-        temp_pdf  = final_pdf + ".part"
+        temp_pdf = final_pdf + ".part"
         try:
-            # generate to temp to ensure writeable directory etc
             c = rl_canvas.Canvas(temp_pdf, pagesize=A4)
             c.showPage(); c.save()
             os.remove(temp_pdf)
@@ -666,25 +666,53 @@ def add_voucher(
         except Exception:
             raise
 
-        # Insert DB row (include new commission-related columns if present in schema)
+        # Determine which columns actually exist in the vouchers table
+        cur.execute("PRAGMA table_info(vouchers)")
+        existing_cols = [r[1] for r in cur.fetchall()]
+
+        # Base columns we always want to insert (if present)
+        col_map = [
+            ("voucher_id", voucher_id),
+            ("created_at", created_at),
+            ("customer_name", customer_name),
+            ("contact_number", contact_number),
+            ("units", units),
+            ("particulars", particulars),
+            ("problem", problem),
+            ("staff_name", staff_name),
+            ("status", status),
+            ("recipient", recipient),
+            ("solution", solution),
+            ("pdf_path", final_pdf),
+            ("technician_id", technician_id),
+            ("technician_name", technician_name),
+            # optional migration-era columns
+            ("ref_bill", ref_bill if ref_bill is not None else ""),
+            ("ref_bill_date", ref_bill_date if ref_bill_date is not None else None),
+            ("amount_rm", float(amount_rm) if amount_rm is not None else None),
+            ("tech_commission", float(tech_commission) if tech_commission is not None else None),
+        ]
+
+        cols_to_insert = []
+        params = []
+        for col, val in col_map:
+            if col in existing_cols:
+                cols_to_insert.append(col)
+                params.append(val)
+
+        if not cols_to_insert:
+            # defensive: should never happen, but abort if vouchers table is missing
+            raise RuntimeError("No writable columns found in vouchers table.")
+
+        placeholders = ",".join("?" for _ in params)
+        sql = f"INSERT INTO vouchers ({', '.join(cols_to_insert)}) VALUES ({placeholders})"
         try:
-            cur.execute("""
-                INSERT INTO vouchers (
-                    voucher_id, created_at, customer_name, contact_number, units,
-                    particulars, problem, staff_name, status, recipient, solution, pdf_path,
-                    technician_id, technician_name, ref_bill, ref_bill_date, amount_rm, tech_commission
-                )
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                voucher_id, created_at, customer_name, contact_number, units,
-                particulars, problem, staff_name, status, recipient, solution, final_pdf,
-                technician_id, technician_name, ref_bill or "", ref_bill_date or "", amount_rm if amount_rm is not None else None,
-                tech_commission if tech_commission is not None else None
-            ))
+            cur.execute(sql, params)
         except Exception:
             # cleanup PDF in case of failure
             try:
-                if os.path.exists(final_pdf): os.remove(final_pdf)
+                if os.path.exists(final_pdf):
+                    os.remove(final_pdf)
             except Exception:
                 pass
             raise
@@ -1811,11 +1839,16 @@ class VoucherApp(ctk.CTk):
             # call add_voucher (new signature)
             try:
                 voucher_id, _ = add_voucher(
-                    name, contact, units,
-                    particulars, problem,
-                    recipient,  # staff_name param
-                    recipient,
-                    solution, technician_id, technician_name,
+                    customer_name=name,
+                    contact_number=contact,
+                    units=units,
+                    particulars=particulars,
+                    problem=problem,
+                    staff_name=recipient,     # preserve previous behavior (recipient used as staff_name)
+                    recipient=recipient,
+                    solution=solution,
+                    technician_id=technician_id,
+                    technician_name=technician_name,
                     status=cb_status.get().strip(),
                     ref_bill=ref_bill_val,
                     ref_bill_date=ref_bill_date_sql,
@@ -3289,6 +3322,98 @@ class VoucherApp(ctk.CTk):
                     values=(staff_opt or "", staff_name, bill_type, bill_no, total, commission, created_at)
                 )
 
+        # Bind button: allow user to bind a commission to a voucher (admin/supervisor)
+        def bind_selected():
+            # Permission guard (change roles as you prefer)
+            if not (self.current_user and self.current_user.get("role") in ("admin", "supervisor")):
+                messagebox.showerror("Permission", "Only admin or supervisor can bind commissions to vouchers.")
+                return
+
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Bind", "Select a commission to bind.")
+                return
+            try:
+                cid = int(sel[0])
+            except Exception:
+                messagebox.showerror("Bind", "Invalid selection.")
+                return
+
+            # Load commission row
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT id, bill_type, bill_no, voucher_id FROM commissions WHERE id=?", (cid,))
+            crow = cur.fetchone()
+            conn.close()
+            if not crow:
+                messagebox.showerror("Bind", "Commission record not found.")
+                return
+            _, bill_type, bill_no, bound_vid = crow
+            if bound_vid:
+                messagebox.showerror("Bind", f"This commission is already bound to voucher {bound_vid}.")
+                return
+
+            # Ask user for voucher ID to bind to
+            vid = simpledialog.askstring("Bind to Voucher", f"Enter Voucher ID to bind for bill {bill_no}:", parent=top)
+            if not vid:
+                return
+            vid = vid.strip()
+
+            # Validate voucher exists
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT voucher_id FROM vouchers WHERE voucher_id = ?", (vid,))
+            vrow = cur.fetchone()
+            conn.close()
+            if not vrow:
+                messagebox.showerror("Bind", f"Voucher {vid} does not exist.")
+                return
+
+            # Ensure this voucher is not already bound to another commission
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM commissions WHERE voucher_id = ?", (vid,))
+            existing = cur.fetchone()
+            conn.close()
+            if existing:
+                messagebox.showerror("Bind", f"Voucher {vid} is already bound to commission id {existing[0]}.")
+                return
+
+            # Perform binding using the helper (handles adding column if missing)
+            try:
+                bind_commission_to_voucher(cid, vid)
+            except Exception as e:
+                messagebox.showerror("Bind Failed", f"Failed to bind commission: {e}")
+                return
+
+            messagebox.showinfo("Bound", f"Commission {cid} bound to Voucher {vid}.")
+            try:
+                refresh()
+            except Exception:
+                pass
+
+        # Add Bind button to toolbar (near Edit/Delete)
+        white_btn(bar, text="Bind Selected", width=140, command=bind_selected).pack(side="right", padx=5)
+
+        # Right-click context menu on tree for binding (same action)
+        try:
+            comm_ctx = tk.Menu(tree, tearoff=0)
+            comm_ctx.add_command(label="Bind to Voucher", command=bind_selected)
+
+            def _comm_popup(event):
+                try:
+                    row = tree.identify_row(event.y)
+                    if row and row not in tree.selection():
+                        tree.selection_set(row)
+                    comm_ctx.post(event.x_root, event.y_root)
+                finally:
+                    comm_ctx.grab_release()
+
+            tree.bind("<Button-3>", _comm_popup)
+        except Exception:
+            # If platform/menu fails, ignore gracefully
+            pass        
+        
         def delete_sel():
             # Extra guard: technicians cannot delete even if button is re-enabled somehow
             if self.current_user and self.current_user.get("role") == "technician":
