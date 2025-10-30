@@ -228,6 +228,33 @@ def _get_setting(cur, key, default=None):
         return str(default)
     return None
 
+def _safe_voucher_int_expr(col_name):
+    """Return a SQL expression that safely casts a voucher id (text) to integer,
+    returning NULL for non-numeric values to avoid CAST errors when voucher_id
+    contains non-numeric characters.
+    Usage in SQL: ORDER BY _safe_voucher_int_expr('voucher_id') DESC
+    """
+    return "CASE WHEN {col} GLOB '[0-9]*' THEN CAST({col} AS INTEGER) ELSE NULL END".replace("{col}", col_name)
+
+def add_column_safe(cur, table, col, typ):
+    """Safely add a column to a table after validating the column name and type against whitelists.
+    This prevents accidental SQL injection via f-strings for identifiers.
+    """
+    allowed_cols = {
+        "vouchers": {"technician_id","technician_name","ref_bill","ref_bill_date",
+                     "amount_rm","tech_commission","reminder_pickup_1","reminder_pickup_2","reminder_pickup_3"}
+    }
+    allowed_types = {"TEXT","REAL","INTEGER","BLOB"}
+    col_clean = col.strip()
+    typ_clean = typ.strip().upper()
+    if table not in allowed_cols:
+        raise ValueError(f"add_column_safe: table not allowed: {table}")
+    if col_clean not in allowed_cols[table]:
+        raise ValueError(f"add_column_safe: unexpected column name: {col_clean}")
+    if typ_clean not in allowed_types:
+        raise ValueError(f"add_column_safe: unexpected column type: {typ_clean}")
+    sql = f"ALTER TABLE {table} ADD COLUMN {col_clean} {typ_clean}"
+    cur.execute(sql)
 
 def _set_setting(cur, key, value):
     cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", (key, str(value)))
@@ -243,6 +270,62 @@ def _verify_pwd(pwd: str, hp: bytes) -> bool:
     except Exception:
         return False
 
+STATUS_CANONICAL = {
+    "open": "open",
+    "pending": "pending",
+    "in progress": "in progress",
+    "in_progress": "in progress",
+    "completed": "completed",
+    "done": "completed",
+    "closed": "closed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "on hold": "on hold",
+    "returned": "returned"
+}
+
+def normalize_status_for_search(raw_status, fuzzy_status=False):
+    """
+    Normalize a user-provided status string for safe searching.
+    - raw_status: the string entered by the user (may be None/empty)
+    - fuzzy_status: when True allow a safe LIKE ('%...%') fallback on the full token (NOT prefix).
+    Returns:
+      (sql_clause_fragment, params)
+      - sql_clause_fragment: e.g. "AND LOWER(status) = ?"
+      - params: list of params to bind
+    If raw_status is falsy, returns ("", [])
+    """
+    if not raw_status:
+        return "", []
+
+    s = raw_status.strip().lower()
+    # Map exact synonyms to canonical
+    if s in STATUS_CANONICAL:
+        canon = STATUS_CANONICAL[s]
+        return "AND LOWER(status) = ?", [canon.lower()]
+
+    # If user supplied a comma-separated list, support explicit list (clean & whitelist)
+    if "," in s:
+        items = [it.strip().lower() for it in s.split(",") if it.strip()]
+        mapped = []
+        for it in items:
+            if it in STATUS_CANONICAL:
+                mapped.append(STATUS_CANONICAL[it].lower())
+            else:
+                # unknown token -> keep as-is only if fuzzy permitted
+                if fuzzy_status:
+                    mapped.append(it)
+        if mapped:
+            placeholders = ",".join("?" for _ in mapped)
+            return f"AND LOWER(status) IN ({placeholders})", mapped
+
+    # As a last resort, if fuzzy_status True, do a safe LIKE on the full token
+    if fuzzy_status:
+        return "AND LOWER(status) LIKE ?", [f"%{s}%"]
+
+    # Unknown/ambiguous status and no fuzzy allowed: return a clause that matches nothing
+    # (this is safer than guessing)
+    return "AND 0", []
 
 def init_db():
     conn = get_conn()
@@ -459,8 +542,9 @@ def _draw_header(c, left, right, top_y, voucher_id):
     if LOGO_PATH and os.path.exists(LOGO_PATH):
         try:
             c.drawImage(LOGO_PATH, right - LOGO_W, y - LOGO_H, LOGO_W, LOGO_H, preserveAspectRatio=True, mask='auto')
-        except Exception:
-            pass
+        except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
+                pass
     c.setFont("Helvetica-Bold", 14);
     c.drawString(left, y, SHOP_NAME)
     c.setFont("Helvetica", 9.2)
@@ -583,7 +667,8 @@ def _draw_policies_and_signatures(c, left, right, bottom_table, left_col_w, reci
         qr_x = right - qr_size
         qr_y = max(policies_bottom + 3 * mm, 10 * mm + qr_size)
         c.drawImage(ImageReader(qr_img), qr_x, qr_y - qr_size, qr_size, qr_size)
-    except Exception:
+    except Exception as e:
+        logger.exception("Caught exception", exc_info=e)
         pass
 
     SIG_LINE_W = 45 * mm;
@@ -713,7 +798,8 @@ def add_voucher(
             try:
                 if os.path.exists(final_pdf):
                     os.remove(final_pdf)
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
             raise
 
@@ -1030,7 +1116,8 @@ class LoginDialog(ctk.CTkToplevel):
                 pass
             try:
                 self.destroy()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
             restart_app()
             return
@@ -1131,9 +1218,11 @@ class VoucherApp(ctk.CTk):
             for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkTooltipFont"):
                 try:
                     tkfont.nametofont(name).configure(size=UI_FONT_SIZE)
-                except Exception:
+                except Exception as e:
+                    logger.exception("Caught exception", exc_info=e)
                     pass
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         self.current_user = None
@@ -1494,7 +1583,8 @@ class VoucherApp(ctk.CTk):
         try:
             if old_pdf and os.path.exists(old_pdf):
                 os.remove(old_pdf)
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
         new_pdf = generate_pdf(
             voucher_id,
@@ -1543,16 +1633,19 @@ class VoucherApp(ctk.CTk):
         def _on_close():
             try:
                 del self._open_windows["add_voucher_ui"]
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
             try:
                 top.destroy()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
         try:
             top.protocol("WM_DELETE_WINDOW", _on_close)
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         frm = ctk.CTkFrame(top)
@@ -1634,7 +1727,8 @@ class VoucherApp(ctk.CTk):
                     id_to_name[sid_opt] = nm
                 tech_name_values.append(nm)
                 name_to_id[nm] = sid_opt or ""
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         # Technician ID (row)
@@ -1798,7 +1892,8 @@ class VoucherApp(ctk.CTk):
                     e_ref_bill.delete(0, "end")
                     e_ref_bill.configure(state="disabled")
                     e_ref_bill_date.configure(state="disabled")
-                except Exception:
+                except Exception as e:
+                    logger.exception("Caught exception", exc_info=e)
                     pass
             else:
                 try:
@@ -1813,7 +1908,8 @@ class VoucherApp(ctk.CTk):
                     if not curv or re.match(r"^(CS|INV)-\d{4}/", curv, re.IGNORECASE):
                         e_ref_bill.delete(0, "end")
                         e_ref_bill.insert(0, prefix)
-                except Exception:
+                except Exception as e:
+                    logger.exception("Caught exception", exc_info=e)
                     pass
 
         try:
@@ -1945,7 +2041,8 @@ class VoucherApp(ctk.CTk):
                     finally:
                         try:
                             conn.close()
-                        except Exception:
+                        except Exception as e:
+                            logger.exception("Caught exception", exc_info=e)
                             pass
                 except Exception as e:
                     logger.exception("Failed binding commission after voucher creation", exc_info=e)
@@ -1956,7 +2053,8 @@ class VoucherApp(ctk.CTk):
 
         try:
             top.update_idletasks()
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
     
     def edit_selected(self):
@@ -2084,7 +2182,8 @@ class VoucherApp(ctk.CTk):
                     id_to_name[sid_opt] = nm
                 tech_name_values.append(nm)
                 name_to_id[nm] = sid_opt or ""
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         ctk.CTkLabel(frm, text="Technician ID").grid(row=r, column=0, sticky="w")
@@ -2395,12 +2494,14 @@ class VoucherApp(ctk.CTk):
                         if any(r[1] == "voucher_id" for r in cur.fetchall()):
                             cur.execute("UPDATE commissions SET voucher_id=NULL, updated_at=? WHERE voucher_id=?", (datetime.now().isoformat(sep=' ', timespec='seconds'), voucher_id))
                             conn.commit()
-                    except Exception:
+                    except Exception as e:
+                        logger.exception("Caught exception", exc_info=e)
                         pass
                     finally:
                         try:
                             conn.close()
-                        except Exception:
+                        except Exception as e:
+                            logger.exception("Caught exception", exc_info=e)
                             pass
 
                     # Now bind chosen commission to this voucher
@@ -2429,7 +2530,8 @@ class VoucherApp(ctk.CTk):
                     finally:
                         try:
                             conn.close()
-                        except Exception:
+                        except Exception as e:
+                            logger.exception("Caught exception", exc_info=e)
                             pass
 
                 except Exception as e:
@@ -2439,11 +2541,13 @@ class VoucherApp(ctk.CTk):
             messagebox.showinfo("Saved", f"Voucher {voucher_id} updated.")
             try:
                 top.destroy()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
             try:
                 self.perform_search()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
         white_btn(btns, text="Save", command=save_edit, width=140).pack(side="right")
@@ -2451,7 +2555,8 @@ class VoucherApp(ctk.CTk):
 
         try:
             top.update_idletasks()
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
     # ---------- Manage Recipient (simple) ----------
@@ -2568,7 +2673,8 @@ class VoucherApp(ctk.CTk):
                 import tkinter.messagebox as messagebox
                 messagebox.showerror('Permission', 'Admin only.')
                 return
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         # Admin-only guard (UI + safety)
@@ -2601,7 +2707,8 @@ class VoucherApp(ctk.CTk):
                 import tkinter.messagebox as messagebox
                 messagebox.showerror('Permission', 'Admin only.')
                 return
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         # Admin-only guard (UI + safety)
@@ -2688,8 +2795,9 @@ class VoucherApp(ctk.CTk):
         def do_refresh():
             try:
                 refresh_users()
-            except Exception:
+            except Exception as e:
                 # if refresh_users not available yet, ignore silently
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
         try:
@@ -2826,7 +2934,8 @@ class VoucherApp(ctk.CTk):
                     for idx, cid in enumerate(cols):
                         try:
                             samples[cid].append(str(vals[idx] or ""))
-                        except Exception:
+                        except Exception as e:
+                            logger.exception("Caught exception", exc_info=e)
                             pass
                 min_widths = []
                 for cid in cols:
@@ -2853,7 +2962,8 @@ class VoucherApp(ctk.CTk):
                     display = (uid, username, role, "Yes" if is_active else "No", "Yes" if must_change else "No")
                     if not q or q in str(username).lower() or q in str(role).lower():
                         tree.insert("", "end", values=display)
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
             autosize_columns()
 
@@ -2861,13 +2971,15 @@ class VoucherApp(ctk.CTk):
         refresh_users()
         try:
             top.bind("<Configure>", lambda e: autosize_columns())
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         # double-click to edit
         try:
             tree.bind("<Double-1>", lambda e: on_edit())
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         # --- Add / Edit dialog implementation (self-contained) ---
@@ -2956,7 +3068,8 @@ class VoucherApp(ctk.CTk):
         # expose tree reference in case other code expects it
         try:
             self._manage_users_tree = tree
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
     # ---------- Staff Profile UI (preview + folder open) ----------
@@ -3058,7 +3171,8 @@ class VoucherApp(ctk.CTk):
             cb_pos.set("Technician")
             try:
                 refresh()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
         def on_delete_staff():
@@ -3097,7 +3211,8 @@ class VoucherApp(ctk.CTk):
             cb_pos.set("Technician")
             try:
                 refresh()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
         def on_reset_fields():
@@ -3146,7 +3261,8 @@ class VoucherApp(ctk.CTk):
                     for idx, cid in enumerate(cols):
                         try:
                             samples[cid].append(str(vals[idx] or ""))
-                        except Exception:
+                        except Exception as e:
+                            logger.exception("Caught exception", exc_info=e)
                             pass
 
                 # Estimate minimum widths (7 px per char) + margin
@@ -3200,7 +3316,8 @@ class VoucherApp(ctk.CTk):
         # binding: double-click to edit
         try:
             tree.bind("<Double-1>", lambda e: self._edit_staff(tree, top))
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         # initial load and sizing
@@ -3208,13 +3325,15 @@ class VoucherApp(ctk.CTk):
             refresh()
             top.update_idletasks()
             autosize_columns()
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         # expose tree for outside helpers if needed
         try:
             self._staff_profile_tree = tree
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
     # ---------- Commission UI (with preview + per-staff storage) ----------
@@ -3298,7 +3417,8 @@ class VoucherApp(ctk.CTk):
                 try:
                     e_bill.delete(0, "end")
                     e_bill.insert(0, prefix)
-                except Exception:
+                except Exception as e:
+                    logger.exception("Caught exception", exc_info=e)
                     pass
 
         try:
@@ -3373,20 +3493,23 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Save Failed", f"Failed to create commission:\n{e}", parent=top)
                 try:
                     conn.close()
-                except Exception:
+                except Exception as e:
+                    logger.exception("Caught exception", exc_info=e)
                     pass
                 return
 
             messagebox.showinfo("Saved", "Commission record created.", parent=top)
             try:
                 top.destroy()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
             # refresh commissions view if open
             try:
                 # If view_commissions exists, call its refresh by triggering perform_search or reopening
                 self.perform_search()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
         white_btn(btns, text="Save", command=save_commission, width=140).pack(side="right")
@@ -3394,7 +3517,8 @@ class VoucherApp(ctk.CTk):
 
         try:
             top.update_idletasks()
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
     def view_commissions(self):
@@ -3535,14 +3659,16 @@ class VoucherApp(ctk.CTk):
                     comm_ctx.grab_release()
 
             tree.bind("<Button-3>", _comm_popup)
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         tree.bind("<Double-1>", lambda e: edit_comm())
 
         try:
             top.update_idletasks()
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
             
     def open_vouchers_for_binding(self, commission_id: int):
@@ -3686,19 +3812,22 @@ class VoucherApp(ctk.CTk):
             finally:
                 try:
                     conn.close()
-                except Exception:
+                except Exception as e:
+                    logger.exception("Caught exception", exc_info=e)
                     pass
 
             messagebox.showinfo("Bound", f"Commission {cid} bound to Voucher {vid}.", parent=pick)
             try:
                 pick.destroy()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
             # Refresh main lists
             try:
                 self.perform_search()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
         # Bind on double-click
@@ -3711,7 +3840,8 @@ class VoucherApp(ctk.CTk):
 
         try:
             pick.update_idletasks()
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
         
         # Right-click context menu
@@ -3731,7 +3861,8 @@ class VoucherApp(ctk.CTk):
                     comm_ctx.grab_release()
 
             tree.bind("<Button-3>", _comm_popup)
-        except Exception:
+        except Exception as e: 
+            logger.exception("Caught exception", exc_info=e)
             pass
 
         # Double click opens edit
@@ -3740,7 +3871,8 @@ class VoucherApp(ctk.CTk):
         # Keep the window responsive
         try:
             top.update_idletasks()
-        except Exception:
+        except Exception as e:
+            logger.exception("Caught exception", exc_info=e)
             pass
 
             # Load commission row and its amounts
@@ -3815,13 +3947,15 @@ class VoucherApp(ctk.CTk):
             finally:
                 try:
                     conn.close()
-                except Exception:
+                except Exception as e:
+                    logger.exception("Caught exception", exc_info=e)
                     pass
 
             messagebox.showinfo("Bound", f"Commission {cid} bound to Voucher {vid}.")
             try:
                 refresh()
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
 
         # Add Bind button to toolbar (near Edit/Delete)
@@ -3842,8 +3976,9 @@ class VoucherApp(ctk.CTk):
                     comm_ctx.grab_release()
 
             tree.bind("<Button-3>", _comm_popup)
-        except Exception:
+        except Exception as e:
             # If platform/menu fails, ignore gracefully
+            logger.exception("Caught exception", exc_info=e)
             pass        
         
         def delete_sel():
@@ -4071,7 +4206,8 @@ def modify_base_vid(new_base: int):
             new_id = old_id + delta
             try:
                 if old_pdf and os.path.exists(old_pdf): os.remove(old_pdf)
-            except Exception:
+            except Exception as e:
+                logger.exception("Caught exception", exc_info=e)
                 pass
             cur.execute("UPDATE vouchers SET voucher_id=? WHERE voucher_id=?", (str(new_id), str(old_id)))
             new_pdf = generate_pdf(str(new_id), customer_name, contact_number, int(units or 1),
