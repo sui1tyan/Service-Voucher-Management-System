@@ -885,7 +885,7 @@ def _process_square_image(path_in, path_out, max_px=400):
 
 # ------------------ Commission utilities ------------------
 BILL_RE_CS = re.compile(r"^CS-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\d{4}$")
-BILL_RE_IV = re.compile(r"^INV-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\d{4}$")
+BILL_RE_INV = re.compile(r"^INV-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\d{4}$")
 
 def _resolve_staff_db_id(tech_id_opt: str, tech_name: str) -> int | None:
     """Find staffs.id by staff_id_opt (preferred) or by name."""
@@ -908,7 +908,7 @@ def _parse_bill(ref_bill: str) -> tuple[str | None, str | None]:
     s = (ref_bill or "").strip().upper()
     if BILL_RE_CS.match(s):
         return "CS", s
-    if BILL_RE_IV.match(s):
+    if BILL_RE_INV.match(s):
         return "INV", s
     return None, None
 
@@ -3310,8 +3310,8 @@ class VoucherApp(ctk.CTk):
         def validate_bill():
             s = (e_bill.get() or "").strip().upper()
             btype = cb_type.get()
-            # Use compiled regexes (BILL_RE_CS and BILL_RE_IV which now matches INV)
-            ok = bool(BILL_RE_CS.match(s)) if btype == "Cash Bill" else bool(BILL_RE_IV.match(s))
+            # Use compiled regexes (BILL_RE_CS and BILL_RE_INV which now matches INV)
+            ok = bool(BILL_RE_CS.match(s)) if btype == "Cash Bill" else bool(BILL_RE_INV.match(s))
             if not ok:
                 messagebox.showerror(
                     "Bill No.", "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: INV-MMDD/XXXX"
@@ -3960,7 +3960,7 @@ class VoucherApp(ctk.CTk):
                 if bt == "Cash Bill":
                     return bool(BILL_RE_CS.match(s))
                 else:
-                    return bool(BILL_RE_IV.match(s))
+                    return bool(BILL_RE_INV.match(s))
 
             def _save_edit():
                 new_bill_no = (e_bill.get() or "").strip().upper()
