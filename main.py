@@ -202,7 +202,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS commissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     staff_id INTEGER REFERENCES staffs(id) ON DELETE CASCADE,
-    bill_type TEXT CHECK(bill_type IN ('CS','IV')),
+    bill_type TEXT CHECK(bill_type IN ('CS','INV')),
     bill_no TEXT,
     total_amount REAL,
     commission_amount REAL,
@@ -633,7 +633,7 @@ def add_voucher(
     solution="",
     technician_id="",
     technician_name="",
-    status=None,   # <-- NEW
+    status=None,
     ref_bill=None,
     ref_bill_date=None,
     amount_rm=None,
@@ -656,7 +656,8 @@ def add_voucher(
         try:
             c = rl_canvas.Canvas(temp_pdf, pagesize=A4)
             c.showPage(); c.save()
-            os.remove(temp_pdf)
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
             pdf_path = generate_pdf(
                 voucher_id, customer_name, contact_number, units,
                 particulars, problem, staff_name, status, created_at, recipient
@@ -664,13 +665,14 @@ def add_voucher(
             if pdf_path != final_pdf and os.path.exists(pdf_path):
                 final_pdf = pdf_path
         except Exception:
+            # re-raise so callers get an exception
             raise
 
         # Determine which columns actually exist in the vouchers table
         cur.execute("PRAGMA table_info(vouchers)")
         existing_cols = [r[1] for r in cur.fetchall()]
 
-        # Base columns we always want to insert (if present)
+        # Map of candidate columns -> values
         col_map = [
             ("voucher_id", voucher_id),
             ("created_at", created_at),
@@ -686,7 +688,6 @@ def add_voucher(
             ("pdf_path", final_pdf),
             ("technician_id", technician_id),
             ("technician_name", technician_name),
-            # optional migration-era columns
             ("ref_bill", ref_bill if ref_bill is not None else ""),
             ("ref_bill_date", ref_bill_date if ref_bill_date is not None else None),
             ("amount_rm", float(amount_rm) if amount_rm is not None else None),
@@ -701,7 +702,6 @@ def add_voucher(
                 params.append(val)
 
         if not cols_to_insert:
-            # defensive: should never happen, but abort if vouchers table is missing
             raise RuntimeError("No writable columns found in vouchers table.")
 
         placeholders = ",".join("?" for _ in params)
@@ -709,7 +709,7 @@ def add_voucher(
         try:
             cur.execute(sql, params)
         except Exception:
-            # cleanup PDF in case of failure
+            # on failure, attempt to remove pdf and re-raise
             try:
                 if os.path.exists(final_pdf):
                     os.remove(final_pdf)
@@ -769,9 +769,6 @@ def _build_search_sql(filters):
 
     sql += " ORDER BY CAST(voucher_id AS INTEGER) DESC"
     return sql, params
-
-
-
 
 def search_vouchers(filters):
     conn = get_conn();
@@ -888,7 +885,7 @@ def _process_square_image(path_in, path_out, max_px=400):
 
 # ------------------ Commission utilities ------------------
 BILL_RE_CS = re.compile(r"^CS-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\d{4}$")
-BILL_RE_IV = re.compile(r"^IV-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\d{4}$")
+BILL_RE_IV = re.compile(r"^INV-(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])/\d{4}$")
 
 def _resolve_staff_db_id(tech_id_opt: str, tech_name: str) -> int | None:
     """Find staffs.id by staff_id_opt (preferred) or by name."""
@@ -906,16 +903,14 @@ def _resolve_staff_db_id(tech_id_opt: str, tech_name: str) -> int | None:
     conn.close()
     return dbid
 
-
 def _parse_bill(ref_bill: str) -> tuple[str | None, str | None]:
     """Return (bill_type, bill_no) if valid else (None, None)."""
     s = (ref_bill or "").strip().upper()
     if BILL_RE_CS.match(s):
         return "CS", s
     if BILL_RE_IV.match(s):
-        return "IV", s
+        return "INV", s
     return None, None
-
 
 # ------------------ UI ------------------
 FONT_FAMILY = "Segoe UI"
@@ -1688,7 +1683,7 @@ class VoucherApp(ctk.CTk):
 
         # ---------------- Bill Type & Bill No (Bill no under Bill Type) ----------------
         ctk.CTkLabel(frm, text="Bill Type").grid(row=r, column=0, sticky="w")
-        bill_type_cb = ctk.CTkComboBox(frm, values=["CS", "IV", "None"], width=120)
+        bill_type_cb = ctk.CTkComboBox(frm, values=["CS", "INV", "None"], width=120)
         bill_type_cb.set("CS")
         bill_type_cb.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
@@ -1750,7 +1745,7 @@ class VoucherApp(ctk.CTk):
                     dd = f"{today.day:02d}"
                     prefix = f"{bt}-{mm}{dd}/"
                     curv = (e_ref_bill.get() or "").strip().upper()
-                    if not curv or re.match(r"^(CS|IV)-\d{4}/", curv, re.IGNORECASE):
+                    if not curv or re.match(r"^(CS|INV)-\d{4}/", curv, re.IGNORECASE):
                         e_ref_bill.delete(0, "end")
                         e_ref_bill.insert(0, prefix)
                 except Exception:
@@ -3077,17 +3072,49 @@ class VoucherApp(ctk.CTk):
         e_comm = ctk.CTkEntry(frm)
         e_comm.grid(row=2, column=1, sticky="ew", padx=8, pady=6)
 
-
+        def _on_comm_bill_type_change(*_a):
+            bt = (cb_type.get() or "").strip()
+            # only enable / set prefix when Invoice or Cash
+            if bt == "Cash Bill":
+                # CS prefix
+                today = datetime.now()
+                mm = f"{today.month:02d}"
+                dd = f"{today.day:02d}"
+                prefix = f"CS-{mm}{dd}/"
+            else:
+                # Invoice Bill -> INV
+                today = datetime.now()
+                mm = f"{today.month:02d}"
+                dd = f"{today.day:02d}"
+                prefix = f"INV-{mm}{dd}/"
+            curv = (e_bill.get() or "").strip().upper()
+            # Only replace if empty or already has CS/INV prefix
+            if not curv or re.match(r"^(CS|INV)-\d{4}/", curv, re.IGNORECASE):
+                try:
+                    e_bill.delete(0, "end")
+                    e_bill.insert(0, prefix)
+                except Exception:
+                    pass
+                    
         # ---------- Validation ----------
         def validate_bill():
             s = (e_bill.get() or "").strip().upper()
             btype = cb_type.get()
+            # Use compiled regexes (BILL_RE_CS and BILL_RE_IV which now matches INV)
             ok = bool(BILL_RE_CS.match(s)) if btype == "Cash Bill" else bool(BILL_RE_IV.match(s))
             if not ok:
                 messagebox.showerror(
-                    "Bill No.", "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: IV-MMDD/XXXX"
+                    "Bill No.", "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: INV-MMDD/XXXX"
                 )
             return ok
+
+        # bind change so prefix updates when user toggles bill type
+        try:
+            cb_type.configure(command=_on_comm_bill_type_change)
+        except Exception:
+            cb_type.bind("<<ComboboxSelected>>", lambda e: _on_comm_bill_type_change())
+        # initial prefix
+        _on_comm_bill_type_change()
 
         # ---------- Save ----------
         def save():
@@ -3118,7 +3145,7 @@ class VoucherApp(ctk.CTk):
             sname = name_map.get(staff_db_id, "unknown")
             base_dir, com_dir = staff_dirs_for(sname)
 
-            bill_type = "CS" if cb_type.get() == "Cash Bill" else "IV"
+            bill_type = "CS" if cb_type.get() == "Cash Bill" else "INV"
             bill_no = (e_bill.get() or "").strip().upper()
 
             # --- Global duplicate check (case-insensitive) ---
@@ -3339,16 +3366,16 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Bind", "Invalid selection.")
                 return
 
-            # Load commission row
+            # Load commission row and its amounts
             conn = get_conn()
             cur = conn.cursor()
-            cur.execute("SELECT id, bill_type, bill_no, voucher_id FROM commissions WHERE id=?", (cid,))
+            cur.execute("SELECT id, staff_id, bill_type, bill_no, total_amount, commission_amount, voucher_id FROM commissions WHERE id=?", (cid,))
             crow = cur.fetchone()
             conn.close()
             if not crow:
                 messagebox.showerror("Bind", "Commission record not found.")
                 return
-            _, bill_type, bill_no, bound_vid = crow
+            _, staff_id, bill_type, bill_no, total_amount, commission_amount, bound_vid = crow
             if bound_vid:
                 messagebox.showerror("Bind", f"This commission is already bound to voucher {bound_vid}.")
                 return
@@ -3385,6 +3412,34 @@ class VoucherApp(ctk.CTk):
             except Exception as e:
                 messagebox.showerror("Bind Failed", f"Failed to bind commission: {e}")
                 return
+
+            # After binding, also update the voucher row so edit_voucher page reads the bill, total and commission amounts.
+            try:
+                # Safely set ref_bill / amount_rm / tech_commission on the voucher if those columns exist
+                conn = get_conn()
+                cur = conn.cursor()
+                # Only update columns that exist (avoid migration issues)
+                cur.execute("PRAGMA table_info(vouchers)")
+                vcols = [r[1] for r in cur.fetchall()]
+                updates = []
+                params = []
+                if "ref_bill" in vcols and bill_no:
+                    updates.append("ref_bill=?"); params.append(bill_no)
+                if "amount_rm" in vcols and total_amount is not None:
+                    updates.append("amount_rm=?"); params.append(total_amount)
+                if "tech_commission" in vcols and commission_amount is not None:
+                    updates.append("tech_commission=?"); params.append(commission_amount)
+                if updates:
+                    params.append(vid)
+                    cur.execute(f"UPDATE vouchers SET {', '.join(updates)} WHERE voucher_id=?", params)
+                    conn.commit()
+            except Exception as e:
+                logger.exception("Failed to write commission amounts into voucher after binding", exc_info=e)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
             messagebox.showinfo("Bound", f"Commission {cid} bound to Voucher {vid}.")
             try:
@@ -3525,7 +3580,7 @@ class VoucherApp(ctk.CTk):
 
             def _save_edit():
                 new_bill_no = (e_bill.get() or "").strip().upper()
-                new_type = "CS" if cb_type.get() == "Cash Bill" else "IV"
+                new_type = "CS" if cb_type.get() == "Cash Bill" else "INV"
                 try:
                     new_total = float(e_total.get()) if e_total.get().strip() != "" else None
                     new_comm = float(e_comm.get()) if e_comm.get().strip() != "" else None
@@ -3539,7 +3594,7 @@ class VoucherApp(ctk.CTk):
 
                 if not _validate_bill_format(new_bill_no):
                     messagebox.showerror("Bill No.",
-                                         "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: IV-MMDD/XXXX")
+                                         "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: INV-MMDD/XXXX")
                     return
 
                 # Global duplicate check (case-insensitive) - exclude current record id
