@@ -779,7 +779,6 @@ def search_vouchers(filters):
     conn.close()
     return rows
 
-
 # ------------------ Users (auth & admin) ------------------
 def get_user_by_username(u):
     conn = get_conn();
@@ -1790,7 +1789,6 @@ class VoucherApp(ctk.CTk):
         e_ref_bill_date.insert(0, _to_ui_date(datetime.now()))
         e_ref_bill_date.grid(row=r, column=1, sticky="w", padx=10, pady=6)
         r += 1
-
 
         # Behavior: when bill type is "None", disable bill no entry
         def _on_bill_type_change(*_a):
@@ -3368,7 +3366,7 @@ class VoucherApp(ctk.CTk):
                 cur.execute("""
                     INSERT INTO commissions (staff_id, bill_type, bill_no, total_amount, commission_amount, bill_image_path, note, created_at, updated_at)
                     VALUES (?,?,?,?,?,?,?,?,?)
-                """, (staff_db_id, bill_type, bill_no or "", total_amt, float(comm_amt), "", note, now, now))
+                """, (staff_db_id, bill_type, bill_no or "", total_amt, float(comm_amt), "", now, now))
                 conn.commit()
                 conn.close()
             except Exception as e:
