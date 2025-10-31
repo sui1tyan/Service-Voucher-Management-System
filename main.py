@@ -517,11 +517,17 @@ def init_db(db_path=DB_FILE):
     Raises on failure.
     """
     conn = None
-    try:
-        import secrets  # local import so top-level imports need not change
-        conn = sqlite3.connect(db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
+        try:
+            # BASE_SCHEMA is the multi-statement string defined in your module
+            cur.executescript(BASE_SCHEMA)
+            conn.commit()
+        except Exception:
+            logger.exception("Failed to apply BASE_SCHEMA (continuing)")
+        try:
+            import secrets  # local import so top-level imports need not change
+            conn = sqlite3.connect(db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
 
         # --- helper: safe numeric voucher expression used in deletes/ordering ---
         def _safe_vid_expr(col_name="voucher_id"):
@@ -717,39 +723,43 @@ def init_db(db_path=DB_FILE):
             cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
             admin_count = cur.fetchone()[0]
             if admin_count == 0:
-                # Use a fixed default password but require user to change it on first login
                 DEFAULT_ADMIN_USERNAME = "tonycom"
-                DEFAULT_ADMIN_PWD = "admin123"   # user requested default password
+                DEFAULT_ADMIN_PWD = "admin123"   # requested default
 
-                # Validate against the active policy if available
-                policy_err = None
+                # validate against policy; if fails, require change on first login
+                must_change = 0
                 try:
                     policy_err = validate_password_policy(DEFAULT_ADMIN_PWD)
+                    if policy_err:
+                        must_change = 1
+                        logger.warning(
+                            "Default admin password does not satisfy password policy: %s. "
+                            "Creating account with must_change_pwd=1.",
+                            policy_err
+                        )
                 except Exception:
-                    # If validator fails, just log and continue; do not block DB creation
-                    logger.exception("validate_password_policy raised an exception")
-
-                if policy_err:
-                    # Log a warning — password doesn't meet policy; still create but force change.
-                    logger.warning(
-                        "Default admin password does not satisfy password policy: %s. Creating account with must_change_pwd=1.",
-                        policy_err
-                    )
+                    # if validator throws, be conservative and force change
+                    must_change = 1
+                    logger.exception("validate_password_policy raised exception; setting must_change_pwd=1")
 
                 ts = datetime.now().isoformat(sep=' ', timespec='seconds')
                 try:
                     hashed = _hash_pwd(DEFAULT_ADMIN_PWD)
                     cur.execute(
                         "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-                        (DEFAULT_ADMIN_USERNAME, "admin", hashed, 1, ts, ts)
+                        (DEFAULT_ADMIN_USERNAME, "admin", hashed, must_change, ts, ts)
                     )
                     conn.commit()
-                    logger.warning("Default admin '%s' created with default password. Must change on first login.", DEFAULT_ADMIN_USERNAME)
+                    if must_change:
+                        logger.warning("Default admin '%s' created; user must change password at first login.", DEFAULT_ADMIN_USERNAME)
+                    else:
+                        logger.info("Default admin '%s' created with default password.", DEFAULT_ADMIN_USERNAME)
                 except sqlite3.IntegrityError:
-                    # If insertion failed due to race/unique constraint, ignore
+                    # Already exists - ignore (race)
                     logger.info("Admin user already exists (race or unique constraint).")
         except Exception:
             logger.exception("Failed to ensure default admin user")
+
 
         # All migrations completed successfully; return the live connection
         return conn
