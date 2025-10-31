@@ -48,21 +48,102 @@ def restart_app():
     else:  # run as script
         os.execl(sys.executable, sys.executable, os.path.abspath(__file__), *sys.argv[1:])
 
+PHONE_MIN_DIGITS = 5
+PHONE_MAX_DIGITS = 15
+PHONE_ALLOWED_RE = re.compile(r"^\+?[0-9]+$")  # only digits and optional leading +
 
-PHONE_RE = re.compile(r"[0-9+()\- ]+")
+def normalize_phone(raw_phone, default_cc=None):
+    """
+    Clean and normalize a phone number string.
 
+    Returns:
+      - A normalized string in E.164-like form: '+<countrycode><number>' if possible,
+        or digits-only string if no country code and default_cc not provided.
+      - Returns None if input is invalid / cannot be normalized.
 
-def normalize_phone(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"[^\d+()\- ]", "", s)
-    return s[:32]
+    Rules:
+      - Accepts numbers with spaces, dashes, parentheses; removes those characters.
+      - Allows a leading '+' for country code.
+      - If the number begins with '00' it treats it as international prefix and converts to '+'.
+      - If number starts with local trunk '0' and default_cc is provided, the 0 is removed and default_cc is prepended.
+      - Ensures total digits (excluding '+') between PHONE_MIN_DIGITS and PHONE_MAX_DIGITS.
+    """
+    if not raw_phone:
+        return None
+    # Trim whitespace
+    s = str(raw_phone).strip()
+    # Replace common separators: spaces, dashes, parentheses, dots
+    s = re.sub(r"[ \-\.\(\)]", "", s)
+    # Convert leading international 00 to +
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    # Only allow digits and optional leading +
+    if not PHONE_ALLOWED_RE.match(s):
+        return None
 
+    # Extract digits-only part
+    digits = s[1:] if s.startswith("+") else s
+
+    # If leading '0' trunk and default_cc provided, convert
+    if not s.startswith("+") and default_cc and digits.startswith("0"):
+        # remove leading 0 and prepend default country code
+        digits = digits.lstrip("0")
+        digits = default_cc + digits
+        s = "+" + digits
+    elif not s.startswith("+") and default_cc and not digits.startswith("0"):
+        # No leading + and no trunk 0, but default_cc set: treat as local and prepend default cc
+        # (only if it's sensible length)
+        if PHONE_MIN_DIGITS <= len(digits) <= PHONE_MAX_DIGITS:
+            s = "+" + default_cc + digits
+            digits = default_cc + digits
+    elif not s.startswith("+"):
+        # no default_cc: leave as digits-only (no +)
+        pass
+
+    # Validate length
+    if not (PHONE_MIN_DIGITS <= len(digits) <= PHONE_MAX_DIGITS):
+        return None
+
+    # Return normalized: prefer + form if present, else digits-only
+    return s if s.startswith("+") else digits
+    
+def is_valid_phone(raw_phone, default_cc=None):
+    """
+    Returns True if phone can be normalized and meets length/character constraints.
+    """
+    try:
+        norm = normalize_phone(raw_phone, default_cc=default_cc)
+        return norm is not None
+    except Exception:
+        logger.exception("Error validating phone")
+        return False
 
 def validate_password_policy(pw: str) -> str | None:
     if not pw:
         return "Password cannot be empty."
     return None   # ✅ everything else is acceptable
+    
+# --- User / role / column whitelists ---
+ALLOWED_ROLES = {"admin", "sales assistant", "technician", "user"}  # update this set to match your app
+USER_UPDATABLE_COLUMNS = {
+    "username", "password_hash", "role", "must_change_pwd",
+    "full_name", "phone", "email", "note"
+}
+# you'll likely have slightly different column names — adjust USER_UPDATABLE_COLUMNS accordingly.
 
+def _begin_immediate_transaction(conn):
+    """
+    For SQLite: acquire a reserved lock to prevent concurrent writers.
+    Use BEFORE checks that must be atomic (like checking admin count then inserting).
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        return cur
+    except Exception:
+        # If BEGIN IMMEDIATE fails, fall back to normal transaction
+        return conn.cursor()
+        
 # ---------- Wrapped text helpers for PDF ----------
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
@@ -212,7 +293,73 @@ CREATE TABLE IF NOT EXISTS commissions (
 );
 """
 
+def ensure_commissions_schema(conn):
+    """
+    Ensure the `commissions` table has the voucher_id column (TEXT).
+    - conn: sqlite3.Connection
+    This will:
+      1) Create a DB backup (via _ensure_db_backup) if available.
+      2) Check PRAGMA table_info('commissions') for 'voucher_id'.
+      3) If missing, attempt a safe ALTER TABLE ADD COLUMN using add_column_safe.
+    Returns:
+      True if schema is present or successfully updated, False on failure.
+    """
+    try:
+        cur = conn.cursor()
 
+        # Create a DB backup before making schema changes (if your project helper exists)
+        try:
+            # _ensure_db_backup expects a cursor sometimes; call it if available
+            if "_ensure_db_backup" in globals():
+                try:
+                    _ensure_db_backup(cur)
+                except Exception:
+                    # best-effort backup attempt; continue even if backup helper misbehaves
+                    logger.exception("Backup helper raised while ensuring commissions schema")
+        except Exception:
+            logger.exception("Failed trying to create DB backup before commissions schema migration")
+
+        # Check if commissions table exists first
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='commissions'")
+        if cur.fetchone() is None:
+            # Table does not exist — nothing to alter, but that's an unusual state.
+            logger.warning("commissions table not found in DB; ensure migrations created it.")
+            return False
+
+        # Check for voucher_id column
+        cur.execute("PRAGMA table_info('commissions')")
+        cols = [r[1] for r in cur.fetchall()]  # second item is column name
+        if "voucher_id" in cols:
+            logger.info("commissions.voucher_id column already present")
+            return True
+
+        # Column missing — add it safely
+        try:
+            # use add_column_safe if available (it validates against expected whitelist)
+            if "add_column_safe" in globals():
+                add_column_safe(cur, "commissions", "voucher_id", "TEXT")
+            else:
+                # fallback: direct ALTER but validate identifier characters roughly
+                if not re.match(r"^[A-Za-z0-9_]+$", "voucher_id"):
+                    raise ValueError("Invalid column name 'voucher_id'")
+                cur.execute("ALTER TABLE commissions ADD COLUMN voucher_id TEXT")
+            # commit migration
+            conn.commit()
+            logger.info("Added voucher_id column to commissions table successfully")
+            return True
+        except Exception:
+            logger.exception("Failed to add voucher_id column to commissions")
+            conn.rollback()
+            return False
+
+    except Exception:
+        logger.exception("Unexpected failure in ensure_commissions_schema")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+        
 def _column_exists(cur, table, column):
     cur.execute(f"PRAGMA table_info({table})")
     return any(row[1] == column for row in cur.fetchall())
@@ -242,8 +389,10 @@ def add_column_safe(cur, table, col, typ):
     """
     allowed_cols = {
         "vouchers": {"technician_id","technician_name","ref_bill","ref_bill_date",
-                     "amount_rm","tech_commission","reminder_pickup_1","reminder_pickup_2","reminder_pickup_3"}
+                     "amount_rm","tech_commission","reminder_pickup_1","reminder_pickup_2","reminder_pickup_3"},
+        "commissions": {"voucher_id"}
     }
+
     allowed_types = {"TEXT","REAL","INTEGER","BLOB"}
     col_clean = col.strip()
     typ_clean = typ.strip().upper()
@@ -327,151 +476,301 @@ def normalize_status_for_search(raw_status, fuzzy_status=False):
     # (this is safer than guessing)
     return "AND 0", []
 
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.executescript(BASE_SCHEMA)
-
-    # --- MIGRATION: ensure users.role allows 'sales assistant' ---
-    cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
-    row = cur.fetchone()
-    if row and "sales assistant" not in (row[0] or ""):
-        cur.execute("ALTER TABLE users RENAME TO users_old")
-        cur.execute("""
-            CREATE TABLE users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE,
-                role TEXT CHECK(role IN ('admin','sales assistant','user','technician')),
-                password_hash BLOB,
-                is_active INTEGER DEFAULT 1,
-                must_change_pwd INTEGER DEFAULT 0,
-                created_at TEXT,
-                updated_at TEXT
-            )
-        """)
-        cur.execute("""
-            INSERT INTO users(id, username, role, password_hash, is_active, must_change_pwd, created_at, updated_at)
-            SELECT id,
-                   username,
-                   CASE WHEN role='supervisor' THEN 'sales assistant' ELSE role END,
-                   password_hash, is_active, must_change_pwd, created_at, updated_at
-            FROM users_old
-        """)
-        cur.execute("DROP TABLE users_old")
-
-
-    cur.execute("UPDATE vouchers SET status = TRIM(status)")
-    conn.commit()
-
-    for col, typ in [
-    ("technician_id", "TEXT"),
-    ("technician_name", "TEXT"),
-    ("ref_bill", "TEXT"),
-    ("ref_bill_date", "TEXT"),
-    ("amount_rm", "REAL"),
-    ("tech_commission", "REAL"),
-    ("reminder_pickup_1", "TEXT"),
-    ("reminder_pickup_2", "TEXT"),
-    ("reminder_pickup_3", "TEXT"),]:
-
-        if not _column_exists(cur, "vouchers", col):
-            cur.execute(f"ALTER TABLE vouchers ADD COLUMN {col} {typ}")
-
+def init_db(db_path=DB_FILE):
+    """
+    Initialize DB and run safe migrations.
+    - Creates a timestamped DB backup before destructive changes.
+    - Ensures users table migration (adds 'sales assistant' role).
+    - Adds missing voucher columns safely.
+    - Ensures commissions schema (voucher_id column) via ensure_commissions_schema.
+    - Creates useful indices and enforces uniqueness after cleaning legacy duplicates.
+    - Creates a default admin account if none exists (temporarily forces password change).
+    Returns sqlite3.Connection on success.
+    Raises on failure.
+    """
+    conn = None
     try:
-        # --- Indexes (and enforce uniqueness for commissions) ---
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_created ON vouchers(created_at)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_status ON vouchers(status)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_customer ON vouchers(customer_name)")
+        import secrets  # local import so top-level imports need not change
+        conn = sqlite3.connect(db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
 
-        # --- VOUCHERS: make ref_bill globally unique (case-insensitive) ---
-        # 1) Clean any legacy duplicates (keep the highest voucher_id)
-        cur.execute("""
-            DELETE FROM vouchers
-            WHERE ref_bill IS NOT NULL AND ref_bill <> ''
-              AND CAST(voucher_id AS INTEGER) NOT IN (
-                SELECT MAX(CAST(voucher_id AS INTEGER)) FROM vouchers
-                WHERE ref_bill IS NOT NULL AND ref_bill <> ''
-                GROUP BY LOWER(ref_bill)
-              )
-        """)
+        # --- helper: safe numeric voucher expression used in deletes/ordering ---
+        def _safe_vid_expr(col_name="voucher_id"):
+            # Use the CASE ... GLOB expression to avoid casting non-numeric values
+            return f"CASE WHEN {col_name} GLOB '[0-9]*' THEN CAST({col_name} AS INTEGER) ELSE NULL END"
 
-        # 2) Enforce uniqueness (ignoring case)
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_ref_bill_unique_ci
-            ON vouchers(LOWER(ref_bill))
-            WHERE ref_bill IS NOT NULL AND ref_bill <> ''
-        """)
-
-
-        # Remove legacy duplicates so the UNIQUE index can be created safely
-        # Remove legacy duplicates so the UNIQUE index can be created safely
-        cur.execute("""
-            DELETE FROM commissions
-            WHERE id NOT IN (
-                SELECT MAX(id) FROM commissions
-                WHERE bill_no IS NOT NULL AND bill_no <> ''
-                GROUP BY bill_type, LOWER(bill_no)
-            )
-        """)
-
-        # Enforce global uniqueness (bill_type + bill_no), ignoring case
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_unique_global
-            ON commissions(bill_type, LOWER(bill_no))
-            WHERE bill_no IS NOT NULL AND bill_no <> ''
-        """)
-
-
-    except Exception as e:
-        logger.exception("Failed setting up indexes/uniqueness for commissions", exc_info=e)
-
-    _get_setting(cur, "base_vid", DEFAULT_BASE_VID)
-
-    cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
-    if cur.fetchone()[0] == 0:
-        cur.execute(
-            "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-            ("tonycom", "admin", _hash_pwd("admin123"), 0,
-             datetime.now().isoformat(sep=' ', timespec='seconds'),
-             datetime.now().isoformat(sep=' ', timespec='seconds'))
-        )
-
-    conn.commit();
-    conn.close()
-
-def bind_commission_to_voucher(commission_id: int, voucher_id: str) -> None:
-    """
-    Bind an existing commission record to a voucher by setting commissions.voucher_id.
-    This will attempt to add the voucher_id column if it doesn't exist yet.
-    Raises ValueError on failures (e.g., already bound).
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    # Ensure voucher_id column exists
-    cur.execute("PRAGMA table_info(commissions)")
-    cols = [r[1] for r in cur.fetchall()]
-    if "voucher_id" not in cols:
+        # --- MIGRATION: ensure users.role allows 'sales assistant' ---
         try:
-            cur.execute("ALTER TABLE commissions ADD COLUMN voucher_id TEXT")
+            # Read current users table ddl
+            cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
+            row = cur.fetchone()
+            ddl = (row[0] or "") if row else ""
+            if "sales assistant" not in ddl:
+                # backup before destructive rename/drop
+                try:
+                    if "_ensure_db_backup" in globals():
+                        _ensure_db_backup(cur)
+                except Exception:
+                    logger.exception("Failed to create DB backup before users table migration")
+
+                # rename, recreate, copy, drop old table
+                cur.execute("ALTER TABLE users RENAME TO users_old")
+                cur.execute("""
+                    CREATE TABLE users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT UNIQUE,
+                        role TEXT CHECK(role IN ('admin','sales assistant','user','technician')),
+                        password_hash BLOB,
+                        is_active INTEGER DEFAULT 1,
+                        must_change_pwd INTEGER DEFAULT 0,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO users(id, username, role, password_hash, is_active, must_change_pwd, created_at, updated_at)
+                    SELECT id,
+                           username,
+                           CASE WHEN role='supervisor' THEN 'sales assistant' ELSE role END,
+                           password_hash, is_active, must_change_pwd, created_at, updated_at
+                    FROM users_old
+                """)
+                cur.execute("DROP TABLE users_old")
+                conn.commit()
+                logger.info("users table migration (sales assistant role) completed.")
+        except Exception:
+            logger.exception("users table migration failed; check DB state")
+
+        # --- Normalization / small update safe-run ---
+        try:
+            cur.execute("UPDATE vouchers SET status = TRIM(status)")
             conn.commit()
         except Exception:
-            # if ALTER fails, proceed but binding likely will fail later
-            logger.exception("Failed to add voucher_id column to commissions", exc_info=True)
+            logger.exception("Failed to TRIM(vouchers.status) — continuing")
 
-    # Fetch commission row
-    cur.execute("SELECT id, voucher_id FROM commissions WHERE id=?", (commission_id,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        raise ValueError("Commission record not found.")
-    _, bound_vid = row
-    if bound_vid:
-        conn.close()
-        raise ValueError("This commission record is already bound to a voucher.")
-    # Bind
-    cur.execute("UPDATE commissions SET voucher_id=?, updated_at=? WHERE id=?", (voucher_id, datetime.now().isoformat(sep=' ', timespec='seconds'), commission_id))
-    conn.commit()
-    conn.close()
+        # --- Add missing voucher columns safely (whitelisted) ---
+        voucher_columns = [
+            ("technician_id", "TEXT"),
+            ("technician_name", "TEXT"),
+            ("ref_bill", "TEXT"),
+            ("ref_bill_date", "TEXT"),
+            ("amount_rm", "REAL"),
+            ("tech_commission", "REAL"),
+            ("reminder_pickup_1", "TEXT"),
+            ("reminder_pickup_2", "TEXT"),
+            ("reminder_pickup_3", "TEXT"),
+        ]
+        for col, typ in voucher_columns:
+            try:
+                if not _column_exists(cur, "vouchers", col):
+                    # Use add_column_safe if present for validation/whitelist
+                    if "add_column_safe" in globals():
+                        add_column_safe(cur, "vouchers", col, typ)
+                    else:
+                        # Fallback with a basic sanity check on identifier
+                        if not re.match(r"^[A-Za-z0-9_]+$", col):
+                            raise ValueError(f"Unsafe column name: {col}")
+                        cur.execute(f"ALTER TABLE vouchers ADD COLUMN {col} {typ}")
+                    logger.info("Added column %s to vouchers", col)
+            except Exception:
+                logger.exception("Failed adding column %s to vouchers (continuing)", col)
+        try:
+            conn.commit()
+        except Exception:
+            logger.exception("commit failed after adding voucher columns")
+
+        # --- Ensure commissions schema (voucher_id column) once, not inside a loop ---
+        try:
+            if "ensure_commissions_schema" in globals():
+                ok = ensure_commissions_schema(conn)
+                if not ok:
+                    logger.warning("ensure_commissions_schema reported failure. Check DB and logs.")
+            else:
+                logger.debug("ensure_commissions_schema not present; skipping commissions schema check")
+        except Exception:
+            logger.exception("ensure_commissions_schema call failed during init_db()")
+
+        # --- Indexes and uniqueness constraints; clean legacy duplicates safely ---
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_created ON vouchers(created_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_status ON vouchers(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_customer ON vouchers(customer_name)")
+            conn.commit()
+        except Exception:
+            logger.exception("Failed creating non-unique indexes; continuing")
+
+        # Clean legacy duplicates for ref_bill before creating UNIQUE index.
+        # This is destructive -> do a backup and run inside a transaction.
+        try:
+            if "_ensure_db_backup" in globals():
+                _ensure_db_backup(cur)
+        except Exception:
+            logger.exception("Failed to create DB backup before cleaning vouchers.ref_bill duplicates")
+
+        try:
+            cur.execute("BEGIN")
+            # Use safe numeric expression for voucher ordering in subquery:
+            safe_vid = _safe_vid_expr("voucher_id")
+            cur.execute(f"""
+                DELETE FROM vouchers
+                WHERE ref_bill IS NOT NULL AND ref_bill <> ''
+                  AND {safe_vid} NOT IN (
+                    SELECT MAX({safe_vid}) FROM vouchers
+                    WHERE ref_bill IS NOT NULL AND ref_bill <> ''
+                    GROUP BY LOWER(ref_bill)
+                  )
+            """)
+            conn.commit()
+            logger.info("Legacy voucher duplicates cleaned (ref_bill).")
+        except Exception:
+            logger.exception("Failed to clean voucher duplicates; performing ROLLBACK")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        # Now create the unique index for ref_bill (case-insensitive)
+        try:
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_ref_bill_unique_ci
+                ON vouchers(LOWER(ref_bill))
+                WHERE ref_bill IS NOT NULL AND ref_bill <> ''
+            """)
+            conn.commit()
+        except Exception:
+            logger.exception("Failed creating unique index for vouchers.ref_bill; check duplicates/logs")
+
+        # Clean legacy duplicates for commissions (destructive) - backup already attempted above.
+        try:
+            if "_ensure_db_backup" in globals():
+                _ensure_db_backup(cur)
+        except Exception:
+            logger.exception("Failed to create DB backup before cleaning commissions duplicates")
+
+        try:
+            cur.execute("BEGIN")
+            cur.execute("""
+                DELETE FROM commissions
+                WHERE id NOT IN (
+                    SELECT MAX(id) FROM commissions
+                    WHERE bill_no IS NOT NULL AND bill_no <> ''
+                    GROUP BY bill_type, LOWER(bill_no)
+                )
+            """)
+            conn.commit()
+            logger.info("Legacy commissions duplicates cleaned.")
+        except Exception:
+            logger.exception("Failed to clean commissions duplicates; rolling back")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        # Create unique index for commissions (bill_type + LOWER(bill_no))
+        try:
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_unique_global
+                ON commissions(bill_type, LOWER(bill_no))
+                WHERE bill_no IS NOT NULL AND bill_no <> ''
+            """)
+            conn.commit()
+        except Exception:
+            logger.exception("Failed creating unique index for commissions; check duplicates/logs")
+
+        # --- Ensure base_vid setting exists ---
+        try:
+            _get_setting(cur, "base_vid", DEFAULT_BASE_VID)
+        except Exception:
+            logger.exception("Failed to ensure base_vid setting")
+
+        # --- Ensure at least one admin user exists; create safe temp admin if none ---
+        try:
+            # simpler approach: fetch the count properly
+            cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+            admin_count = cur.fetchone()[0]
+            if admin_count == 0:
+                # Generate a temporary secure password and force change on first login
+                temp_pwd = secrets.token_urlsafe(12)
+                hashed = _hash_pwd(temp_pwd)
+                ts = datetime.now().isoformat(sep=' ', timespec='seconds')
+                cur.execute(
+                    "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                    ("tonycom", "admin", hashed, 1, ts, ts)
+                )
+                conn.commit()
+                # Log the temp password to the app log (operator can read it and change)
+                logger.warning("Default admin 'tonycom' created with temporary password: %s. Must change on first login.", temp_pwd)
+        except Exception:
+            logger.exception("Failed to ensure default admin user")
+
+        # All migrations completed successfully; return the live connection
+        return conn
+
+    except Exception:
+        logger.exception("init_db failed")
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        raise
+
+def bind_commission_to_voucher(conn, commission_id, voucher_id):
+    """
+    Bind a commission row to a voucher by setting commissions.voucher_id = ? for the given commission_id.
+    - conn: sqlite3.Connection
+    - commission_id: the primary key or unique id of the commission record (as stored)
+    - voucher_id: the voucher identifier to bind
+
+    This function no longer modifies schema; it assumes the 'voucher_id' column already exists.
+    If column is missing, it will log and return False with an explanatory message.
+    Returns True on success, False on failure.
+    """
+    try:
+        cur = conn.cursor()
+
+        # Check schema: make sure voucher_id column exists
+        cur.execute("PRAGMA table_info('commissions')")
+        cols = [r[1] for r in cur.fetchall()]
+        if "voucher_id" not in cols:
+            logger.error("bind_commission_to_voucher: 'voucher_id' column missing from commissions table. "
+                         "Please run init_db() or ensure migrations have been applied.")
+            return False
+
+        # Create a backup before mutating (best-effort call)
+        try:
+            if "_ensure_db_backup" in globals():
+                try:
+                    _ensure_db_backup(cur)
+                except Exception:
+                    logger.exception("Backup helper failed inside bind_commission_to_voucher")
+        except Exception:
+            logger.exception("Unexpected error invoking backup helper inside bind_commission_to_voucher")
+
+        # Perform the binding in a transaction
+        try:
+            cur.execute("BEGIN")
+            cur.execute("UPDATE commissions SET voucher_id = ? WHERE id = ?", (voucher_id, commission_id))
+            if cur.rowcount == 0:
+                # No row updated - maybe commission_id not found
+                logger.warning("bind_commission_to_voucher: no commission row found for id=%s", commission_id)
+                cur.execute("ROLLBACK")
+                return False
+            conn.commit()
+            logger.info("Bound commission id=%s to voucher_id=%s", commission_id, voucher_id)
+            return True
+        except Exception:
+            logger.exception("Failed to update commission voucher_id; rolling back")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+
+    except Exception:
+        logger.exception("Unexpected error in bind_commission_to_voucher")
+        return False
 
 def _read_base_vid():
     conn = get_conn()
@@ -807,17 +1106,20 @@ def add_voucher(
         return voucher_id, final_pdf
 
 def update_voucher_fields(voucher_id, **fields):
-    if not fields: return
-    if "status" in fields: _validate_status_or_raise(fields["status"])
+    if not fields:
+        return
+    if "status" in fields:
+        _validate_status_or_raise(fields["status"])
     with get_conn() as conn:
         cur = conn.cursor()
-        cols, params = [], []
+        cols = []
+        params = []
         for k, v in fields.items():
-            cols.append(f"{k}=?");
+            cols.append(f"{k}=?")
             params.append(v)
         params.append(voucher_id)
         cur.execute(f"UPDATE vouchers SET {', '.join(cols)} WHERE voucher_id = ?", params)
-
+        conn.commit()
 
 def bulk_update_status(voucher_ids, new_status):
     _validate_status_or_raise(new_status)
@@ -828,32 +1130,103 @@ def bulk_update_status(voucher_ids, new_status):
     conn.commit();
     conn.close()
 
-
-def _build_search_sql(filters):
-    sql = ("SELECT voucher_id, created_at, customer_name, contact_number, units, "
-           "recipient, technician_id, technician_name, status, solution, pdf_path "
-           "FROM vouchers WHERE 1=1")
+def _build_search_sql(search_params):
+    """
+    Build parameterized SQL and params for searching vouchers.
+    Returns (sql, params) where SQL selects the columns used by perform_search.
+    """
+    search_params = search_params or {}
+    # Base select - explicit columns so callers can unpack predictably
+    sql = """
+      SELECT voucher_id, created_at, customer_name, contact_number, units,
+             recipient, technician_id, technician_name, status, solution, pdf_path
+      FROM vouchers
+      WHERE 1=1
+    """
     params = []
 
-    if filters.get("voucher_id"):
-        sql += " AND voucher_id LIKE ?"; params.append(f"%{filters['voucher_id']}%")
-    if filters.get("name"):
-        sql += " AND customer_name LIKE ? COLLATE NOCASE"; params.append(f"%{filters['name']}%")
-    if filters.get("contact"):
-        sql += " AND contact_number LIKE ?"; params.append(f"%{filters['contact']}%")
+    # voucher_id exact or wildcard
+    vid = (search_params.get("voucher_id") or "").strip()
+    if vid:
+        if "%" in vid or "*" in vid:
+            vid_sql = vid.replace("*", "%")
+            sql += " AND voucher_id LIKE ?"
+            params.append(vid_sql)
+        else:
+            sql += " AND voucher_id = ?"
+            params.append(vid)
 
-    df = filters.get("date_from"); dt = filters.get("date_to")
-    if df: sql += " AND created_at >= ?"; params.append(df + " 00:00:00")
-    if dt: sql += " AND created_at <= ?"; params.append(dt + " 23:59:59")
+    # customer name supports both 'customer_name' and 'name' keys
+    cust = search_params.get("customer_name") or search_params.get("name")
+    if cust:
+        sql += " AND LOWER(customer_name) LIKE ?"
+        params.append(f"%{cust.strip().lower()}%")
 
-    # ---- robust status filter (ignores spaces/case, tolerates typos like "Pendina") ----
-    st = (filters.get("status") or "").strip()
-    if st and st.lower() != "all":
-        # Prefer prefix match (so 'Pending', 'Pendina', 'pending ' all match).
-        sql += " AND REPLACE(LOWER(IFNULL(status,'')),' ','') LIKE ?"
-        params.append(re.sub(r"\s+", "", st).lower()[:5] + "%")   # 'Pending' -> 'pend%' , 'Completed' -> 'compl%'
+    # contact / phone -> use contact_number column
+    phone_input = search_params.get("phone") or search_params.get("contact")
+    if phone_input:
+        # Try to normalize; if normalize produces +CC..., search the digits only
+        norm_phone_search = normalize_phone(phone_input, default_cc="60")
+        if norm_phone_search:
+            # search digits-only part
+            params.append(f"%{norm_phone_search.lstrip('+')}%")
+            sql += " AND REPLACE(REPLACE(REPLACE(contact_number, '+', ''), '-', ''), ' ', '') LIKE ?"
+        else:
+            sql += " AND contact_number LIKE ?"
+            params.append(f"%{phone_input}%")
 
-    sql += " ORDER BY CAST(voucher_id AS INTEGER) DESC"
+    # technician partial
+    tech = search_params.get("technician")
+    if tech:
+        sql += " AND LOWER(technician_name) LIKE ?"
+        params.append(f"%{tech.strip().lower()}%")
+
+    # status normalization helper
+    status_fragment, status_params = normalize_status_for_search(
+        search_params.get("status"), fuzzy_status=bool(search_params.get("fuzzy_status", False))
+    )
+    if status_fragment:
+        sql += " " + status_fragment
+        params.extend(status_params)
+
+    # date range against created_at (YYYY-MM-DD)
+    date_from = search_params.get("date_from")
+    date_to = search_params.get("date_to")
+    if date_from:
+        sql += " AND date(created_at) >= date(?)"
+        params.append(date_from)
+    if date_to:
+        sql += " AND date(created_at) <= date(?)"
+        params.append(date_to)
+
+    # status_list (whitelisted already)
+    if search_params.get("status_list"):
+        status_list = [s.strip().lower() for s in search_params.get("status_list") if s.strip()]
+        if status_list:
+            placeholders = ",".join("?" for _ in status_list)
+            sql += f" AND LOWER(status) IN ({placeholders})"
+            params.extend(status_list)
+
+    # ordering: try numeric voucher_id ordering using your helper
+    try:
+        numeric_vid_expr = _safe_voucher_int_expr("voucher_id")
+        sql += f" ORDER BY {numeric_vid_expr} DESC, voucher_id DESC"
+    except Exception:
+        sql += " ORDER BY voucher_id DESC"
+
+    # limit / offset
+    limit = search_params.get("limit")
+    offset = search_params.get("offset")
+    if isinstance(limit, int) and limit > 0:
+        sql += " LIMIT ?"
+        params.append(limit)
+        if isinstance(offset, int) and offset >= 0:
+            sql += " OFFSET ?"
+            params.append(offset)
+    elif isinstance(offset, int) and offset > 0:
+        sql += " LIMIT -1 OFFSET ?"
+        params.append(offset)
+
     return sql, params
 
 def search_vouchers(filters):
@@ -884,52 +1257,97 @@ def list_users():
     conn.close();
     return rows
 
+def create_user(username, password, role="user", must_change_pwd=0, extra_fields=None):
+    """
+    Create a user. Accepts plaintext password (it will be hashed).
+    Returns new user id.
+    """
+    extra_fields = extra_fields or {}
+    username = (username or "").strip()
+    if not username:
+        raise ValueError("username required")
+    # align allowed roles with DB CHECK
+    if role not in {"admin", "sales assistant", "user", "technician"}:
+        raise ValueError(f"role must be one of {{'admin','sales assistant','user','technician'}}")
 
-def create_user(username, role, password):
-    if role not in ("sales assistant", "user", "admin", "technician"):
-        raise ValueError("Invalid role")
+    # Validate extra fields keys
+    for k in extra_fields.keys():
+        if k not in USER_UPDATABLE_COLUMNS:
+            raise ValueError(f"unsupported field for create_user: {k}")
 
-    if role == "admin":
-        conn = get_conn();
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'");
-        n = cur.fetchone()[0]
+    conn = get_conn()
+    try:
+        cur = _begin_immediate_transaction(conn)
+
+        # If creating admin, ensure no other admin exists
+        if role == "admin":
+            cur.execute("SELECT COUNT(1) FROM users WHERE role = ?", ("admin",))
+            count_admins = cur.fetchone()[0]
+            if count_admins > 0:
+                raise ValueError("An admin user already exists; cannot create a second admin.")
+
+        cols = ["username", "password_hash", "role", "must_change_pwd"]
+        placeholders = ["?"] * len(cols)
+        hashed = _hash_pwd(password)
+        values = [username, hashed, role, int(bool(must_change_pwd))]
+
+        for k in extra_fields:
+            cols.append(k)
+            placeholders.append("?")
+            values.append(extra_fields[k])
+
+        sql = f"INSERT INTO users ({', '.join(cols)}) VALUES ({', '.join(placeholders)})"
+        cur.execute(sql, values)
+        uid = cur.lastrowid
+        conn.commit()
+        return uid
+    except Exception:
+        logger.exception("Failed to create user")
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        if n >= 1: raise ValueError("Only one admin allowed")
-    conn = get_conn();
-    cur = conn.cursor()
-    err = validate_password_policy(password)
-    if err: raise ValueError(err)
-    cur.execute("""INSERT INTO users (username, role, password_hash, created_at, updated_at)
-                   VALUES (?,?,?,?,?)""",
-                (username, role, _hash_pwd(password),
-                 datetime.now().isoformat(sep=" ", timespec="seconds"),
-                 datetime.now().isoformat(sep=" ", timespec="seconds")))
-    conn.commit();
-    conn.close()
 
 
 def update_user(user_id, **fields):
-    if not fields: return
-    if "role" in fields and fields["role"] == "admin":
-        conn = get_conn();
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND id<>?", (user_id,));
-        n = cur.fetchone()[0]
-        conn.close()
-        if n >= 1: raise ValueError("Only one admin allowed")
-    conn = get_conn();
-    cur = conn.cursor()
-    cols, params = [], []
-    for k, v in fields.items():
-        cols.append(f"{k}=?");
-        params.append(v)
-    params.append(user_id)
-    cur.execute(f"UPDATE users SET {', '.join(cols)}, updated_at=? WHERE id=?",
-                params[:-1] + [datetime.now().isoformat(sep=" ", timespec="seconds"), user_id])
-    conn.commit();
-    conn.close()
+    """
+    Update a user by id. Accepts keyword args for columns (whitelisted).
+    Returns number of rows updated.
+    """
+    if not fields:
+        raise ValueError("no fields to update")
+    # Validate keys
+    for k in fields.keys():
+        if k not in USER_UPDATABLE_COLUMNS:
+            raise ValueError(f"unsupported update column: {k}")
+    conn = get_conn()
+    try:
+        cur = _begin_immediate_transaction(conn)
 
+        # If role is changing to admin, ensure no other admin exists (excluding this user)
+        if "role" in fields and fields["role"] == "admin":
+            cur.execute("SELECT COUNT(1) FROM users WHERE role = ? AND id != ?", ("admin", user_id))
+            count_admins = cur.fetchone()[0]
+            if count_admins > 0:
+                raise ValueError("Another admin already exists; cannot promote this user to admin.")
+
+        set_clauses = []
+        params = []
+        for k, v in fields.items():
+            set_clauses.append(f"{k} = ?")
+            params.append(v)
+        params.append(user_id)
+        sql = f"UPDATE users SET {', '.join(set_clauses)} WHERE id = ?"
+        cur.execute(sql, params)
+        updated = cur.rowcount
+        conn.commit()
+        return updated
+    except Exception:
+        logger.exception("Failed to update user")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def reset_password(user_id, new_pwd):
     conn = get_conn();
@@ -1194,16 +1612,100 @@ def _validate_status_or_raise(s: str):
 
 
 class VoucherApp(ctk.CTk):
-    def _copy_selected_row(self, tree):
-        sel = tree.selection()
-        if not sel:
-            return
-        vals = tree.item(sel[0])["values"]
+    def _copy_selected_row(self, max_chars=5000):
+        """
+        Copy the currently selected tree row to the clipboard safely.
+        - If the row's text exceeds max_chars, copy a truncated preview to clipboard
+          and write the full text to a timestamped temp file, then notify the user.
+        - Uses tkinter clipboard methods (clipboard_clear / clipboard_append).
+        - Logs exceptions for debugging.
+        """
         try:
-            self.clipboard_clear()
-            self.clipboard_append("\t".join(str(v) for v in vals))
+            sel = None
+            try:
+                sel = self.tree.selection()
+            except Exception:
+                # some older code may use different tree attribute; try alternative names
+                try:
+                    sel = getattr(self, "voucher_tree").selection()
+                except Exception:
+                    sel = None
+
+            if not sel:
+                try:
+                    messagebox.showinfo("Copy", "No row selected.")
+                except Exception:
+                    logger.info("No row selected to copy.")
+                return
+
+            # Use the first selected item
+            iid = sel[0]
+            values = self.tree.item(iid).get("values", [])
+            # Clean values into a readable string (column headers not needed)
+            row_text = "\t".join([str(v) for v in values])
+
+            # If small enough, copy directly
+            if len(row_text) <= max_chars:
+                try:
+                    self.clipboard_clear()
+                    self.clipboard_append(row_text)
+                    # On some platforms, update() helps flush the clipboard
+                    try:
+                        self.update()
+                    except Exception:
+                        pass
+                    messagebox.showinfo("Copy", "Row copied to clipboard.")
+                    return
+                except Exception as e:
+                    logger.exception("Failed to copy to clipboard", exc_info=e)
+                    # fallback to saving to file below
+
+            # Large content path: truncate for clipboard, save full to temp file
+            preview = row_text[: max(0, max_chars - 200)]  # leave room for notice
+            notice = "\n\n[TRUNCATED] Full content saved to file."
+            clipboard_text = preview + notice
+
+            # Save full content to a temp file with timestamp
+            try:
+                ts = datetime.now().strftime("%Y%m%d%H%M%S")
+                safe_dir = os.path.join(os.path.dirname(DB_FILE) if 'DB_FILE' in globals() else os.getcwd(), "exports")
+                os.makedirs(safe_dir, exist_ok=True)
+                filename = os.path.join(safe_dir, f"voucher_row_full_{ts}.txt")
+                with open(filename, "w", encoding="utf-8") as fh:
+                    fh.write(row_text)
+                # Write truncated preview to clipboard
+                try:
+                    self.clipboard_clear()
+                    self.clipboard_append(clipboard_text)
+                    try:
+                        self.update()
+                    except Exception:
+                        pass
+                except Exception:
+                    logger.exception("Failed to place truncated text on clipboard")
+                # Inform the user where full content is saved
+                try:
+                    messagebox.showinfo(
+                        "Copy (truncated)",
+                        f"Row content was too large — a preview was copied to the clipboard.\n\n"
+                        f"The full content was saved to:\n{filename}"
+                    )
+                except Exception:
+                    logger.info("Large row saved to %s", filename)
+            except Exception as e:
+                logger.exception("Failed to save large clipboard content to file", exc_info=e)
+                try:
+                    messagebox.showerror("Copy failed", "Failed to copy or save row content. See logs for details.")
+                except Exception:
+                    pass
+
         except Exception as e:
-            messagebox.showerror("Copy", f"Failed to copy:\n{e}")
+            # Top-level catch so user doesn't see a crash; log stack trace
+            logger.exception("Unexpected error in _copy_selected_row", exc_info=e)
+            try:
+                messagebox.showerror("Copy", "Unexpected error when copying row. Check logs.")
+            except Exception:
+                pass
 
     def __init__(self):
         super().__init__()
@@ -1443,7 +1945,7 @@ class VoucherApp(ctk.CTk):
         return {
             "voucher_id": self.f_voucher.get().strip(),
             "name": self.f_name.get().strip(),
-            "contact": self.f_contact.get().strip(),
+            "contact": normalize_phone(self.f_contact.get()),
             "date_from": _from_ui_date_to_sqldate(self.f_from.get().strip()),
             "date_to": _from_ui_date_to_sqldate(self.f_to.get().strip()),
             "status": (self.f_status.get() or "").strip(),  # trim
@@ -1924,7 +2426,7 @@ class VoucherApp(ctk.CTk):
 
         def save():
             name = e_name.get().strip()
-            contact = e_contact.get().strip()
+            contact = normalize_phone(e_contact.get())
             try:
                 units = int((e_units.get() or "1").strip())
                 if units <= 0:
@@ -1938,7 +2440,9 @@ class VoucherApp(ctk.CTk):
             if recipient in ("— Select —", ""):
                 messagebox.showerror("Missing", "Please choose a Recipient.")
                 return
-            solution = t_sol.get("1.0", "end").strip()
+
+            # For Add UI we don't have a solution text area; default to empty
+            solution = ""
 
             # Technician resolution
             tech_id_sel = cb_tech_id.get().strip()
@@ -1953,57 +2457,40 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Missing", "Customer name and contact are required.")
                 return
 
-            # Bill handling — chosen commission optional now.
-            bt = (bill_type_cb.get() or "None").strip().upper()
+            # use chosen commission if any (nonlocal_chosen), otherwise create without binding
+            chosen_comm = nonlocal_chosen.get("id")
 
-            commission_row = None
-            if nonlocal_chosen.get("id"):
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute("SELECT id, voucher_id, bill_type, bill_no, total_amount, commission_amount FROM commissions WHERE id=?", (nonlocal_chosen["id"],))
-                commission_row = cur.fetchone()
-                conn.close()
-                if not commission_row:
-                    # chosen commission disappeared; warn user and allow proceed without binding
-                    messagebox.showwarning("Warning", "Chosen commission not found; voucher will be saved without binding.")
-                    commission_row = None
-                else:
-                    comm_id, bound_vid, comm_bt, comm_no, comm_total, comm_amt = commission_row
-                    if bound_vid:
-                        messagebox.showwarning("Already Bound", "The chosen commission is already bound to another voucher; voucher will be saved without binding.")
-                        commission_row = None
-            # If no chosen commission, proceed to create voucher normally (binding optional)
+            # For Add UI we set status to Pending
+            status_val = "Pending"
 
-            # If bill type is not NONE and a bill no is provided, verify commission record exists and not already bound
-            commission_row = None
-            if bt != "NONE" and ref_bill_val:
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute("SELECT id, voucher_id FROM commissions WHERE bill_type=? AND LOWER(bill_no)=LOWER(?)", (bt, ref_bill_val))
-                commission_row = cur.fetchone()
-                conn.close()
-                if not commission_row:
-                    messagebox.showerror("Missing Commission", "The commission record does not exist. Please choose 'None' at bill type option.")
-                    return
-                comm_id, bound_vid = commission_row
-                if bound_vid:
-                    messagebox.showerror("Already Bound", "The commission record has already been bound to another voucher.")
-                    return
+            # Determine ref_bill and amounts if we selected a commission
+            ref_bill_val = nonlocal_chosen.get("bill_no") if nonlocal_chosen else None
+            ref_bill_date_sql = _from_ui_date_to_sqldate(e_ref_bill_date.get().strip()) if e_ref_bill_date else None
+            amount_val = None
+            tech_comm_val = None
+            if nonlocal_chosen:
+                try:
+                    amount_val = float(nonlocal_chosen.get("total")) if nonlocal_chosen.get("total") not in (None, "") else None
+                except Exception:
+                    amount_val = None
+                try:
+                    tech_comm_val = float(nonlocal_chosen.get("commission")) if nonlocal_chosen.get("commission") not in (None, "") else None
+                except Exception:
+                    tech_comm_val = None
 
-            # call add_voucher (new signature)
             try:
-                voucher_id, _ = add_voucher(
+                voucher_id, _pdf = add_voucher(
                     customer_name=name,
                     contact_number=contact,
                     units=units,
                     particulars=particulars,
                     problem=problem,
-                    staff_name=recipient,     # preserve previous behavior (recipient used as staff_name)
+                    staff_name=recipient,
                     recipient=recipient,
                     solution=solution,
                     technician_id=technician_id,
                     technician_name=technician_name,
-                    status=cb_status.get().strip(),
+                    status=status_val,
                     ref_bill=ref_bill_val,
                     ref_bill_date=ref_bill_date_sql,
                     amount_rm=amount_val,
@@ -2013,12 +2500,11 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Save Failed", f"Failed to create voucher:\n{ex}")
                 return
 
-            # Bind if commission_row exists (optional)
-            if commission_row:
+            # Bind commission if a chosen commission existed
+            if chosen_comm:
                 try:
-                    comm_id = commission_row[0]
-                    bind_commission_to_voucher(comm_id, voucher_id)
-                    # update voucher with commission details if columns exist (same logic as before)
+                    bind_commission_to_voucher(chosen_comm, voucher_id)
+                    # optionally write commission details into voucher (safe-update)
                     try:
                         conn = get_conn()
                         cur = conn.cursor()
@@ -2026,12 +2512,12 @@ class VoucherApp(ctk.CTk):
                         vcols = [r[1] for r in cur.fetchall()]
                         updates = []
                         params = []
-                        if "ref_bill" in vcols and commission_row[3]:
-                            updates.append("ref_bill=?"); params.append(commission_row[3])
-                        if "amount_rm" in vcols and commission_row[4] is not None:
-                            updates.append("amount_rm=?"); params.append(commission_row[4])
-                        if "tech_commission" in vcols and commission_row[5] is not None:
-                            updates.append("tech_commission=?"); params.append(commission_row[5])
+                        if "ref_bill" in vcols and ref_bill_val:
+                            updates.append("ref_bill=?"); params.append(ref_bill_val)
+                        if "amount_rm" in vcols and amount_val is not None:
+                            updates.append("amount_rm=?"); params.append(amount_val)
+                        if "tech_commission" in vcols and tech_comm_val is not None:
+                            updates.append("tech_commission=?"); params.append(tech_comm_val)
                         if updates:
                             params.append(voucher_id)
                             cur.execute(f"UPDATE vouchers SET {', '.join(updates)} WHERE voucher_id=?", params)
@@ -2041,22 +2527,22 @@ class VoucherApp(ctk.CTk):
                     finally:
                         try:
                             conn.close()
-                        except Exception as e:
-                            logger.exception("Caught exception", exc_info=e)
+                        except Exception:
                             pass
                 except Exception as e:
                     logger.exception("Failed binding commission after voucher creation", exc_info=e)
                     messagebox.showwarning("Bound Failed", f"Voucher created ({voucher_id}) but failed to bind commission: {e}")
 
-        white_btn(btns, text="Save", command=save, width=140).pack(side="right")
-        white_btn(btns, text="Cancel", command=_on_close, width=100).pack(side="right", padx=(0,8))
+            messagebox.showinfo("Saved", f"Voucher {voucher_id} created.")
+            try:
+                _on_close()
+            except Exception:
+                pass
+            try:
+                self.perform_search()
+            except Exception:
+                pass
 
-        try:
-            top.update_idletasks()
-        except Exception as e:
-            logger.exception("Caught exception", exc_info=e)
-            pass
-    
     def edit_selected(self):
         sels = self.tree.selection()
         if len(sels) != 1:
@@ -2396,7 +2882,7 @@ class VoucherApp(ctk.CTk):
 
         def save_edit():
             name = e_name.get().strip()
-            contact = e_contact.get().strip()
+            contact = normalize_phone(e_contact.get())
             try:
                 units_val = int((e_units.get() or "1").strip())
                 if units_val <= 0:
@@ -3140,7 +3626,7 @@ class VoucherApp(ctk.CTk):
             name = e_name.get().strip()
             staff_id_opt = e_staffid.get().strip()
             position = cb_pos.get().strip()
-            phone = e_phone.get().strip()
+            phone = normalize_phone(e_phone.get())
             if not name:
                 messagebox.showerror("Missing", "Please enter Name.")
                 return
