@@ -119,9 +119,32 @@ def is_valid_phone(raw_phone, default_cc=None):
         return False
 
 def validate_password_policy(pw: str) -> str | None:
-    if not pw:
+    """
+    Validate password according to the app policy.
+    Returns:
+      - None if password is acceptable,
+      - String error message if not acceptable.
+    Policy (same rules used in UI forced-change):
+      - at least 10 chars
+      - at least one uppercase
+      - at least one lowercase
+      - at least one digit
+      - at least one symbol (non-alphanumeric)
+    """
+    if pw is None:
         return "Password cannot be empty."
-    return None   # ✅ everything else is acceptable
+    s = str(pw)
+    if len(s) < 10:
+        return "Password must be at least 10 characters."
+    if not re.search(r"[A-Z]", s):
+        return "Include at least one uppercase letter."
+    if not re.search(r"[a-z]", s):
+        return "Include at least one lowercase letter."
+    if not re.search(r"\d", s):
+        return "Include at least one digit."
+    if not re.search(r"[^\w\s]", s):
+        return "Include at least one symbol."
+    return None
     
 # --- User / role / column whitelists ---
 ALLOWED_ROLES = {"admin", "sales assistant", "technician", "user"}  # update this set to match your app
@@ -143,6 +166,19 @@ def _begin_immediate_transaction(conn):
     except Exception:
         # If BEGIN IMMEDIATE fails, fall back to normal transaction
         return conn.cursor()
+        
+# save as reset_tony_pwd.py and run: python reset_tony_pwd.py
+DB = "vouchers.db"   # adjust if your DB file path differs
+USERNAME = "tonycom"
+NEW_PWD = "admin123"  # <--- note: this is weak; consider a stronger password
+
+h = bcrypt.hashpw(NEW_PWD.encode("utf-8"), bcrypt.gensalt())
+conn = sqlite3.connect(DB)
+cur = conn.cursor()
+cur.execute("UPDATE users SET password_hash=?, must_change_pwd=0 WHERE username=?", (h, USERNAME))
+conn.commit()
+conn.close()
+print("Password reset for", USERNAME)
         
 # ---------- Wrapped text helpers for PDF ----------
 from reportlab.platypus import Paragraph
@@ -188,6 +224,12 @@ SHOP_TEL = "Tel : 089-763778, H/P: 0168260533"
 LOGO_PATH = ""  # optional: path to logo image (png/jpg). leave blank to skip
 
 DEFAULT_BASE_VID = 41000
+
+# Default admin account (created if no admin exists).
+# NOTE: Using 'admin123' is weak — the code will force password-change if policy
+# rejects it. Consider using a stronger default or forcing immediate change.
+DEFAULT_ADMIN_USERNAME = "tonycom"
+DEFAULT_ADMIN_PASSWORD = "admin123"
 
 
 def safe_folder_name(name: str) -> str:
@@ -684,23 +726,34 @@ def init_db(db_path=DB_FILE):
         except Exception:
             logger.exception("Failed to ensure base_vid setting")
 
-        # --- Ensure at least one admin user exists; create safe temp admin if none ---
+        # --- Ensure at least one admin user exists; create default admin if none ---
         try:
-            # simpler approach: fetch the count properly
             cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
             admin_count = cur.fetchone()[0]
             if admin_count == 0:
-                # Generate a temporary secure password and force change on first login
-                temp_pwd = secrets.token_urlsafe(12)
-                hashed = _hash_pwd(temp_pwd)
+                # Use the configured default password (not random)
+                default_pwd = DEFAULT_ADMIN_PASSWORD
+                # Validate against policy
+                policy_err = validate_password_policy(default_pwd)
+                # If policy fails, force must_change_pwd so operator must change on first login
+                must_change_flag = 1 if policy_err else 0
+
+                hashed = _hash_pwd(default_pwd)
                 ts = datetime.now().isoformat(sep=' ', timespec='seconds')
                 cur.execute(
                     "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-                    ("tonycom", "admin", hashed, 1, ts, ts)
+                    (DEFAULT_ADMIN_USERNAME, "admin", hashed, must_change_flag, ts, ts)
                 )
                 conn.commit()
-                # Log the temp password to the app log (operator can read it and change)
-                logger.warning("Default admin 'tonycom' created with temporary password: %s. Must change on first login.", temp_pwd)
+                if policy_err:
+                    logger.warning(
+                        "Default admin '%s' created with default password which does NOT meet policy: %s. "
+                        "Account marked must_change_pwd=1 so user must update password on first login.",
+                        DEFAULT_ADMIN_USERNAME, policy_err
+                    )
+                else:
+                    logger.info("Default admin '%s' created with default password. (Password meets policy).",
+                                DEFAULT_ADMIN_USERNAME)
         except Exception:
             logger.exception("Failed to ensure default admin user")
 
@@ -1484,8 +1537,6 @@ class LoginDialog(ctk.CTkToplevel):
             messagebox.showerror("Login", "Please enter username and password.")
             return
 
-
-
         row = get_user_by_username(u)
         if not row:
             messagebox.showerror("Login", "Invalid credentials.")
@@ -1501,49 +1552,71 @@ class LoginDialog(ctk.CTkToplevel):
 
         # Force password change flow
         if must_change:
-            def _validate_password(pw: str) -> str | None:
-                if len(pw) < 10: return "Password must be at least 10 characters."
-                if not re.search(r"[A-Z]", pw): return "Include at least one uppercase letter."
-                if not re.search(r"[a-z]", pw): return "Include at least one lowercase letter."
-                if not re.search(r"\d", pw): return "Include at least one digit."
-                if not re.search(r"[^\w\s]", pw): return "Include at least one symbol."
-                return None
+            # Show a helpful note listing the password requirements
+            req_text = (
+                "Your account requires a password change.\n\n"
+                "Password requirements:\n"
+                "- At least 10 characters\n"
+                "- At least one uppercase letter\n"
+                "- At least one lowercase letter\n"
+                "- At least one digit\n"
+                "- At least one symbol (e.g. !@#$%^&*)\n\n"
+                "You can cancel to abort login."
+            )
+            messagebox.showinfo("Change Password — Requirements", req_text, parent=self)
 
-            new1 = simpledialog.askstring("Change Password", "Enter new password:", show="•", parent=self)
-            if not new1: return
-            new2 = simpledialog.askstring("Change Password", "Confirm new password:", show="•", parent=self)
-            if new1 != new2:
-                messagebox.showerror("Password", "Passwords do not match.")
-                return
-            err = _validate_password(new1)
-            if err:
-                messagebox.showerror("Password", err)
-                return
+            # Loop to ask for new password until it validates or user cancels
+            while True:
+                new1 = simpledialog.askstring("Change Password", "Enter new password:", show="•", parent=self)
+                if new1 is None:
+                    # user cancelled
+                    return
+                new2 = simpledialog.askstring("Change Password", "Confirm new password:", show="•", parent=self)
+                if new2 is None:
+                    # user cancelled confirmation
+                    return
+                if new1 != new2:
+                    messagebox.showerror("Password", "Passwords do not match.", parent=self)
+                    continue
 
-            reset_password(uid, new1)  # clears must_change flag
-            messagebox.showinfo("Password Changed",
-                                "Your password has been changed.\nThe application will restart now.")
-            try:
-                self.grab_release()
-            except Exception:
-                logger.exception("Failed to release grab during restart", exc_info=True)
-            try:
-                if self.master is not None:
-                    self.master.destroy()
-            except Exception:
-                pass
-            try:
-                self.destroy()
-            except Exception as e:
-                logger.exception("Caught exception", exc_info=e)
-                pass
-            restart_app()
-            return
+                # Use global validate_password_policy()
+                err = validate_password_policy(new1)
+                if err:
+                    messagebox.showerror("Password", err, parent=self)
+                    # loop again so user can correct
+                    continue
+
+                # All good — apply change and continue with restart flow
+                try:
+                    reset_password(uid, new1)  # clears must_change flag
+                except Exception as e:
+                    logger.exception("Failed to reset password during forced change", exc_info=e)
+                    messagebox.showerror("Password", f"Failed to set new password: {e}", parent=self)
+                    return
+
+                messagebox.showinfo("Password Changed",
+                                    "Your password has been changed.\nThe application will restart now.",
+                                    parent=self)
+                try:
+                    self.grab_release()
+                except Exception:
+                    logger.exception("Failed to release grab during restart", exc_info=True)
+                try:
+                    if self.master is not None:
+                        self.master.destroy()
+                except Exception:
+                    pass
+                try:
+                    self.destroy()
+                except Exception as e:
+                    logger.exception("Caught exception", exc_info=e)
+                    pass
+                restart_app()
+                return
 
         # Success path: set result and close dialog
         self.result = {"id": uid, "username": username, "role": role}
         self.destroy()
-
 
 def white_btn(parent, **kwargs):
     kwargs.setdefault("fg_color", "white")
@@ -1552,7 +1625,6 @@ def white_btn(parent, **kwargs):
     kwargs.setdefault("border_width", 1)
     kwargs.setdefault("hover_color", "#F0F0F0")
     return ctk.CTkButton(parent, **kwargs)
-
 
 def make_xy_scroller(parent):
     """Return (outer_frame, inner_frame) where inner_frame is scrollable on both axes."""
@@ -1600,16 +1672,13 @@ def make_xy_scroller(parent):
 
     return outer, inner
 
-
 STATUS_VALUES = ["All", "Pending", "Completed", "Deleted", "1st call", "2nd reminder", "3rd reminder"]
 
 STATUS_ALLOWED = {"Pending", "Completed", "Deleted", "1st call", "2nd reminder", "3rd reminder"}
 
-
 def _validate_status_or_raise(s: str):
     if s not in STATUS_ALLOWED:
         raise ValueError(f"Invalid status: {s}")
-
 
 class VoucherApp(ctk.CTk):
     def _copy_selected_row(self, max_chars=5000):
