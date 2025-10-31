@@ -40,7 +40,6 @@ def get_conn():
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
-
 def restart_app():
     """Restart the current app (PyInstaller EXE or python script) with same args."""
     if getattr(sys, "frozen", False):  # packaged exe
@@ -166,19 +165,6 @@ def _begin_immediate_transaction(conn):
     except Exception:
         # If BEGIN IMMEDIATE fails, fall back to normal transaction
         return conn.cursor()
-        
-# save as reset_tony_pwd.py and run: python reset_tony_pwd.py
-DB = "vouchers.db"   # adjust if your DB file path differs
-USERNAME = "tonycom"
-NEW_PWD = "admin123"  # <--- note: this is weak; consider a stronger password
-
-h = bcrypt.hashpw(NEW_PWD.encode("utf-8"), bcrypt.gensalt())
-conn = sqlite3.connect(DB)
-cur = conn.cursor()
-cur.execute("UPDATE users SET password_hash=?, must_change_pwd=0 WHERE username=?", (h, USERNAME))
-conn.commit()
-conn.close()
-print("Password reset for", USERNAME)
         
 # ---------- Wrapped text helpers for PDF ----------
 from reportlab.platypus import Paragraph
@@ -731,29 +717,37 @@ def init_db(db_path=DB_FILE):
             cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
             admin_count = cur.fetchone()[0]
             if admin_count == 0:
-                # Use the configured default password (not random)
-                default_pwd = DEFAULT_ADMIN_PASSWORD
-                # Validate against policy
-                policy_err = validate_password_policy(default_pwd)
-                # If policy fails, force must_change_pwd so operator must change on first login
-                must_change_flag = 1 if policy_err else 0
+                # Use a fixed default password but require user to change it on first login
+                DEFAULT_ADMIN_USERNAME = "tonycom"
+                DEFAULT_ADMIN_PWD = "admin123"   # user requested default password
 
-                hashed = _hash_pwd(default_pwd)
-                ts = datetime.now().isoformat(sep=' ', timespec='seconds')
-                cur.execute(
-                    "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-                    (DEFAULT_ADMIN_USERNAME, "admin", hashed, must_change_flag, ts, ts)
-                )
-                conn.commit()
+                # Validate against the active policy if available
+                policy_err = None
+                try:
+                    policy_err = validate_password_policy(DEFAULT_ADMIN_PWD)
+                except Exception:
+                    # If validator fails, just log and continue; do not block DB creation
+                    logger.exception("validate_password_policy raised an exception")
+
                 if policy_err:
+                    # Log a warning — password doesn't meet policy; still create but force change.
                     logger.warning(
-                        "Default admin '%s' created with default password which does NOT meet policy: %s. "
-                        "Account marked must_change_pwd=1 so user must update password on first login.",
-                        DEFAULT_ADMIN_USERNAME, policy_err
+                        "Default admin password does not satisfy password policy: %s. Creating account with must_change_pwd=1.",
+                        policy_err
                     )
-                else:
-                    logger.info("Default admin '%s' created with default password. (Password meets policy).",
-                                DEFAULT_ADMIN_USERNAME)
+
+                ts = datetime.now().isoformat(sep=' ', timespec='seconds')
+                try:
+                    hashed = _hash_pwd(DEFAULT_ADMIN_PWD)
+                    cur.execute(
+                        "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                        (DEFAULT_ADMIN_USERNAME, "admin", hashed, 1, ts, ts)
+                    )
+                    conn.commit()
+                    logger.warning("Default admin '%s' created with default password. Must change on first login.", DEFAULT_ADMIN_USERNAME)
+                except sqlite3.IntegrityError:
+                    # If insertion failed due to race/unique constraint, ignore
+                    logger.info("Admin user already exists (race or unique constraint).")
         except Exception:
             logger.exception("Failed to ensure default admin user")
 
