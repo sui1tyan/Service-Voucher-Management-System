@@ -8,27 +8,22 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          # PyInstaller is currently most stable on 3.11
           python-version: "3.11"
 
-      - name: Ensure build base
-        run: python -m pip install --upgrade pip setuptools wheel
-      
-      - name: Install dependencies
+      - name: Install build tools and dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
           pip install customtkinter reportlab qrcode pillow pandas openpyxl pyinstaller bcrypt cffi
 
-      # ---------------- ONEDIR (recommended) ----------------
-      - name: Build ONEDIR
+      - name: Build (PyInstaller, --onedir)
+        # default shell on windows-latest is PowerShell, so use backticks for line continuation
         run: |
           pyinstaller --clean --onedir --noconsole main.py --name ServiceVoucherApp `
             --add-data "logo.jpg;." `
@@ -36,11 +31,14 @@ jobs:
             --exclude-module PIL._avif `
             --hidden-import=bcrypt `
             --hidden-import=_cffi_backend `
-            --noupx    
+            --noupx
 
-      - name: Zip ONEDIR artifact
+      - name: Create ZIP artifact (single top-level folder)
         run: |
-          Compress-Archive -Path "dist/ServiceVoucherApp/*" -DestinationPath "dist/ServiceVoucherApp_onedir.zip"
+          # Ensure destination exists
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # Compress the folder so the zip contains "ServiceVoucherApp/" as the top-level directory
+          Compress-Archive -Path "dist/ServiceVoucherApp" -DestinationPath "dist/ServiceVoucherApp_onedir.zip" -Force
 
       - name: Upload ONEDIR artifact
         uses: actions/upload-artifact@v4
