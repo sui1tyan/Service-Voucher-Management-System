@@ -323,60 +323,55 @@ CREATE TABLE IF NOT EXISTS commissions (
 
 def ensure_commissions_schema(conn):
     """
-    Ensure the `commissions` table has the voucher_id column (TEXT).
-    - conn: sqlite3.Connection
-    This will:
-      1) Create a DB backup (via _ensure_db_backup) if available.
-      2) Check PRAGMA table_info('commissions') for 'voucher_id'.
-      3) If missing, attempt a safe ALTER TABLE ADD COLUMN using add_column_safe.
-    Returns:
-      True if schema is present or successfully updated, False on failure.
+    Ensure the `commissions` table has the expected additional columns (voucher_id TEXT, note TEXT).
+    Returns True if schema is present or successfully updated, False on failure.
     """
     try:
         cur = conn.cursor()
 
-        # Create a DB backup before making schema changes (if your project helper exists)
+        # Best-effort backup helper if present
         try:
-            # _ensure_db_backup expects a cursor sometimes; call it if available
             if "_ensure_db_backup" in globals():
                 try:
                     _ensure_db_backup(cur)
                 except Exception:
-                    # best-effort backup attempt; continue even if backup helper misbehaves
                     logger.exception("Backup helper raised while ensuring commissions schema")
         except Exception:
             logger.exception("Failed trying to create DB backup before commissions schema migration")
 
-        # Check if commissions table exists first
+        # If commissions table missing, warn and return False (unexpected)
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='commissions'")
         if cur.fetchone() is None:
-            # Table does not exist — nothing to alter, but that's an unusual state.
             logger.warning("commissions table not found in DB; ensure migrations created it.")
             return False
 
-        # Check for voucher_id column
+        # Check columns present
         cur.execute("PRAGMA table_info('commissions')")
-        cols = [r[1] for r in cur.fetchall()]  # second item is column name
-        if "voucher_id" in cols:
-            logger.info("commissions.voucher_id column already present")
+        cols = [r[1] for r in cur.fetchall()]
+
+        # required columns we want to ensure (column_name -> SQL type)
+        required = {"voucher_id": "TEXT", "note": "TEXT"}
+        missing = [c for c in required.keys() if c not in cols]
+
+        if not missing:
+            logger.info("commissions schema OK (voucher_id and note present)")
             return True
 
-        # Column missing — add it safely
+        # Add missing columns safely
         try:
-            # use add_column_safe if available (it validates against expected whitelist)
-            if "add_column_safe" in globals():
-                add_column_safe(cur, "commissions", "voucher_id", "TEXT")
-            else:
-                # fallback: direct ALTER but validate identifier characters roughly
-                if not re.match(r"^[A-Za-z0-9_]+$", "voucher_id"):
-                    raise ValueError("Invalid column name 'voucher_id'")
-                cur.execute("ALTER TABLE commissions ADD COLUMN voucher_id TEXT")
-            # commit migration
+            for col in missing:
+                typ = required[col]
+                if "add_column_safe" in globals():
+                    add_column_safe(cur, "commissions", col, typ)
+                else:
+                    if not re.match(r"^[A-Za-z0-9_]+$", col):
+                        raise ValueError(f"Invalid column name '{col}'")
+                    cur.execute(f"ALTER TABLE commissions ADD COLUMN {col} {typ}")
             conn.commit()
-            logger.info("Added voucher_id column to commissions table successfully")
+            logger.info("Added missing columns to commissions: %s", ", ".join(missing))
             return True
         except Exception:
-            logger.exception("Failed to add voucher_id column to commissions")
+            logger.exception("Failed to add missing columns to commissions: %s", missing)
             conn.rollback()
             return False
 
@@ -415,10 +410,11 @@ def add_column_safe(cur, table, col, typ):
     """Safely add a column to a table after validating the column name and type against whitelists.
     This prevents accidental SQL injection via f-strings for identifiers.
     """
+    # NOTE: 'note' added to commissions allowed set
     allowed_cols = {
         "vouchers": {"technician_id","technician_name","ref_bill","ref_bill_date",
                      "amount_rm","tech_commission","reminder_pickup_1","reminder_pickup_2","reminder_pickup_3"},
-        "commissions": {"voucher_id"}
+        "commissions": {"voucher_id", "note"}
     }
 
     allowed_types = {"TEXT","REAL","INTEGER","BLOB"}
@@ -2492,7 +2488,7 @@ class VoucherApp(ctk.CTk):
             bill_type_cb.bind("<<ComboboxSelected>>", lambda e: _on_bill_type_change())
         _on_bill_type_change()
 
-        # Buttons
+        # Buttons (Add Voucher)
         btns = ctk.CTkFrame(top)
         btns.pack(fill="x", padx=12, pady=(6, 12))
 
@@ -2614,6 +2610,10 @@ class VoucherApp(ctk.CTk):
                 self.perform_search()
             except Exception:
                 pass
+
+        # Add Save / Cancel buttons (were missing previously)
+        white_btn(btns, text="Save", command=save, width=140).pack(side="right")
+        white_btn(btns, text="Cancel", command=lambda: _on_close(), width=100).pack(side="right", padx=(0,8))
 
     def edit_selected(self):
         sels = self.tree.selection()
@@ -3896,55 +3896,34 @@ class VoucherApp(ctk.CTk):
 
     # ---------- Commission UI (with preview + per-staff storage) ----------
     def add_commission(self):
-        """
-        Add Commission window.
-        Layout changed:
-          - Commission Amount (top)
-          - Bill Type and Total Amount under Commission Amount
-        Window size fixed and smaller.
-        Auto-prefix bill no with CS-mmdd/ or INV-mmdd/.
-        Commits to DB and refreshes commission list when saved.
-        """
+        """Add Commission dialog (note field removed to match DB schema)."""
         top = ctk.CTkToplevel(self)
         top.title("Add Commission")
-        # Fixed, smaller size
-        top.geometry("720x420")
-        top.resizable(False, False)
+        # slightly larger so form fields & buttons fit comfortably
+        top.geometry("820x520")
         top.grab_set()
 
         frm = ctk.CTkFrame(top)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
-        frm.grid_columnconfigure(1, weight=1)
+        for c in range(4):
+            frm.grid_columnconfigure(c, weight=1)
 
         r = 0
-        # Staff selection
-        ctk.CTkLabel(frm, text="Staff (owner)").grid(row=r, column=0, sticky="w")
-        try:
-            staff_list = list_staffs_names()
-        except Exception:
-            staff_list = []
-        staff_list = (["— Select —"] + staff_list) if staff_list else ["— Select —"]
-        cb_staff = ctk.CTkComboBox(frm, values=staff_list, width=320)
-        cb_staff.set(staff_list[0])
+        ctk.CTkLabel(frm, text="Staff").grid(row=r, column=0, sticky="w")
+        staff_names = list_staffs_names()
+        cb_staff = ctk.CTkComboBox(frm, values=["— Select —"] + staff_names, width=420)
+        cb_staff.set("— Select —")
         cb_staff.grid(row=r, column=1, sticky="w", padx=8, pady=6)
         r += 1
 
-        # Commission Amount (top)
-        ctk.CTkLabel(frm, text="Commission Amount").grid(row=r, column=0, sticky="w")
-        e_comm_amt = ctk.CTkEntry(frm, width=200)
-        e_comm_amt.grid(row=r, column=1, sticky="w", padx=8, pady=6)
-        r += 1
-
-        # Bill Type (below commission amount)
         ctk.CTkLabel(frm, text="Bill Type").grid(row=r, column=0, sticky="w")
-        cb_type = ctk.CTkComboBox(frm, values=["Cash Bill", "Invoice Bill"], width=200)
+        cb_type = ctk.CTkComboBox(frm, values=["Cash Bill", "Invoice"], width=200)
         cb_type.set("Cash Bill")
         cb_type.grid(row=r, column=1, sticky="w", padx=8, pady=6)
         r += 1
 
-        # Bill No (auto-prefix) placed under bill type
         ctk.CTkLabel(frm, text="Bill No").grid(row=r, column=0, sticky="w")
-        e_bill = ctk.CTkEntry(frm, width=300)
+        e_bill = ctk.CTkEntry(frm, width=420)
         e_bill.grid(row=r, column=1, sticky="w", padx=8, pady=6)
         r += 1
 
@@ -3954,11 +3933,7 @@ class VoucherApp(ctk.CTk):
         e_total.grid(row=r, column=1, sticky="w", padx=8, pady=6)
         r += 1
 
-        # Optional note or created_by
-        ctk.CTkLabel(frm, text="Note").grid(row=r, column=0, sticky="nw")
-        txt_note = tk.Text(frm, height=3, width=46)
-        txt_note.grid(row=r, column=1, sticky="w", padx=8, pady=6)
-        r += 1
+        # -- NOTE field removed intentionally --
 
         # Auto-prefix for bill based on type
         def _on_comm_bill_type_change(*_a):
@@ -3975,8 +3950,7 @@ class VoucherApp(ctk.CTk):
                 try:
                     e_bill.delete(0, "end")
                     e_bill.insert(0, prefix)
-                except Exception as e:
-                    logger.exception("Caught exception", exc_info=e)
+                except Exception:
                     pass
 
         try:
@@ -3996,10 +3970,11 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Missing", "Please select a staff for this commission.", parent=top)
                 return
             try:
-                comm_amt = float((e_comm_amt.get() or "").strip())
+                comm_amt = float((e_total.get() or "").strip()) if (e_total.get() or "").strip() else None
             except Exception:
-                messagebox.showerror("Invalid", "Commission Amount must be a number.", parent=top)
+                messagebox.showerror("Invalid", "Total Amount must be a number.", parent=top)
                 return
+
             bill_type_text = cb_type.get()
             bill_type = "CS" if bill_type_text == "Cash Bill" else "INV"
             bill_no = (e_bill.get() or "").strip().upper()
@@ -4014,16 +3989,7 @@ class VoucherApp(ctk.CTk):
                     messagebox.showerror("Bill No.", "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: INV-MMDD/XXXX", parent=top)
                     return
 
-            try:
-                total_amt = None
-                if (e_total.get() or "").strip():
-                    total_amt = float(e_total.get().strip())
-            except Exception:
-                messagebox.showerror("Invalid", "Total Amount must be a number.", parent=top)
-                return
-
-            note = txt_note.get("1.0", "end").strip()
-            # resolve staff id from name
+            # resolve staff id from name (if exists)
             staff_db_id = None
             try:
                 conn = get_conn()
@@ -4036,38 +4002,35 @@ class VoucherApp(ctk.CTk):
             except Exception:
                 staff_db_id = None
 
-            # insert commission
+            # insert commission (NO 'note' column)
             try:
                 conn = get_conn()
                 cur = conn.cursor()
                 now = datetime.now().isoformat(sep=' ', timespec='seconds')
                 cur.execute("""
-                    INSERT INTO commissions (staff_id, bill_type, bill_no, total_amount, commission_amount, bill_image_path, note, created_at, updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?)
-                """, (staff_db_id, bill_type, bill_no or "", total_amt, float(comm_amt), "", now, now))
+                    INSERT INTO commissions
+                        (staff_id, bill_type, bill_no, total_amount, commission_amount, bill_image_path, created_at, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, (staff_db_id, bill_type, bill_no or "", comm_amt if comm_amt is not None else None, 0.0, "", now, now))
                 conn.commit()
                 conn.close()
             except Exception as e:
                 messagebox.showerror("Save Failed", f"Failed to create commission:\n{e}", parent=top)
                 try:
                     conn.close()
-                except Exception as e:
-                    logger.exception("Caught exception", exc_info=e)
+                except Exception:
                     pass
                 return
 
             messagebox.showinfo("Saved", "Commission record created.", parent=top)
             try:
                 top.destroy()
-            except Exception as e:
-                logger.exception("Caught exception", exc_info=e)
+            except Exception:
                 pass
             # refresh commissions view if open
             try:
-                # If view_commissions exists, call its refresh by triggering perform_search or reopening
                 self.perform_search()
-            except Exception as e:
-                logger.exception("Caught exception", exc_info=e)
+            except Exception:
                 pass
 
         white_btn(btns, text="Save", command=save_commission, width=140).pack(side="right")
@@ -4075,101 +4038,103 @@ class VoucherApp(ctk.CTk):
 
         try:
             top.update_idletasks()
-        except Exception as e:
-            logger.exception("Caught exception", exc_info=e)
+        except Exception:
             pass
 
     def view_commissions(self):
-        """View / Edit Commissions - widened layout, fixed size, bind workflow."""
+        """View / Edit Commissions - cleaned, widened layout, single handlers."""
         top = ctk.CTkToplevel(self)
         top.title("Commissions")
-        # Wider and fixed size
-        top.geometry("1180x650")
+        top.geometry("1280x720")
         top.resizable(False, False)
         top.grab_set()
 
+        # --- Top toolbar ---
         bar = ctk.CTkFrame(top)
-        bar.pack(fill="x", padx=8, pady=(8,4))
+        bar.pack(fill="x", padx=8, pady=(8, 4))
 
-        e_q = ctk.CTkEntry(bar, placeholder_text="Search staff, bill no or id", width=420)
-        e_q.pack(side="left", padx=(6,8))
+        e_q = ctk.CTkEntry(bar, placeholder_text="Search staff, bill no or id", width=520)
+        e_q.pack(side="left", padx=(6, 8))
 
         def do_search():
             refresh(e_q.get())
 
-        white_btn(bar, text="Filter", width=100, command=do_search).pack(side="left", padx=(0,6))
-        white_btn(bar, text="Refresh", width=100, command=lambda: refresh("")).pack(side="left", padx=(0,6))
+        white_btn(bar, text="Filter", width=100, command=do_search).pack(side="left", padx=(0, 6))
+        white_btn(bar, text="Refresh", width=100, command=lambda: refresh("")).pack(side="left", padx=(0, 6))
 
         btn_frame = ctk.CTkFrame(bar)
         btn_frame.pack(side="right", padx=6)
 
-        white_btn(btn_frame, text="Delete Selected", width=130, command=lambda: _delete_selected()).pack(side="right", padx=(6,0))
-        white_btn(btn_frame, text="Bind Selected", width=130, command=lambda: bind_selected()).pack(side="right", padx=(6,0))
-        white_btn(btn_frame, text="Edit Selected", width=120, command=lambda: edit_comm()).pack(side="right", padx=(6,0))
-        white_btn(btn_frame, text="Add Commission", width=140, command=lambda: (self.add_commission(), refresh(e_q.get()))).pack(side="right", padx=(6,0))
+        white_btn(btn_frame, text="Delete Selected", width=130, command=lambda: _delete_selected()).pack(side="right",
+                                                                                                         padx=(6, 0))
+        white_btn(btn_frame, text="Bind Selected", width=130, command=lambda: bind_selected()).pack(side="right",
+                                                                                                    padx=(6, 0))
+        white_btn(btn_frame, text="Edit Selected", width=120, command=lambda: edit_comm()).pack(side="right",
+                                                                                                 padx=(6, 0))
+        white_btn(btn_frame, text="Add Commission", width=140,
+                  command=lambda: (self.add_commission(), refresh(e_q.get()))).pack(side="right", padx=(6, 0))
 
+        # --- Tree / list area ---
         wrap = ctk.CTkFrame(top)
-        wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
+        wrap.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
-        cols = ("id","staff_id","staff_name","bill_type","bill_no","total_amount","commission_amount","voucher_id","created_at")
+        cols = ("id", "staff_id", "staff_name", "bill_type", "bill_no", "total_amount", "commission_amount",
+                "voucher_id", "created_at")
         tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
         headings = [
-            ("id","ID",60),
-            ("staff_id","StaffID",100),
-            ("staff_name","Staff",200),
-            ("bill_type","Type",80),
-            ("bill_no","Bill No",240),
-            ("total_amount","Total",120),
-            ("commission_amount","Commission",140),
-            ("voucher_id","Voucher ID",120),
-            ("created_at","Created",160),
+            ("id", "ID", 60),
+            ("staff_id", "StaffID", 110),
+            ("staff_name", "Staff", 260),
+            ("bill_type", "Type", 90),
+            ("bill_no", "Bill No", 340),
+            ("total_amount", "Total", 140),
+            ("commission_amount", "Commission", 160),
+            ("voucher_id", "Voucher ID", 140),
+            ("created_at", "Created", 180),
         ]
         for key, title, w in headings:
             tree.heading(key, text=title)
             tree.column(key, width=w, anchor="w", stretch=False)
-        tree.pack(fill="both", expand=True, side="left", padx=(0,6), pady=6)
+        tree.pack(fill="both", expand=True, side="left", padx=(0, 6), pady=6)
 
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         vsb.pack(side="left", fill="y")
         tree.configure(yscrollcommand=vsb.set)
 
+        # --- Loader ---
         def _load_rows(q=""):
             qlow = (q or "").strip().lower()
             conn = get_conn()
             cur = conn.cursor()
             cur.execute("""
-                SELECT c.id, s.staff_id_opt, s.name, c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.voucher_id, c.created_at
+                SELECT c.id, c.staff_id, s.name, c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.voucher_id, c.created_at
                 FROM commissions c
                 LEFT JOIN staffs s ON c.staff_id = s.id
-                ORDER BY c.id DESC
+                ORDER BY c.created_at DESC
             """)
             rows = cur.fetchall()
             conn.close()
             tree.delete(*tree.get_children())
-            for (cid, staff_opt, staff_name, bt, bno, tot, comm, vid, created_at) in rows:
-                display = (cid, staff_opt or "", staff_name or "", bt or "", bno or "", tot or "", comm or "", vid or "", created_at or "")
-                if qlow:
-                    joined = " ".join(map(str, display)).lower()
-                    if qlow not in joined:
-                        continue
+            for (cid, sid, sname, bt, bno, tot, comm, vid, created_at) in rows:
+                display = (cid, sid or "", sname or "", bt or "", bno or "", tot or "", comm or "", vid or "",
+                           created_at or "")
+                if qlow and qlow not in " ".join(map(str, display)).lower():
+                    continue
                 tree.insert("", "end", iid=str(cid), values=display)
 
-        def refresh(q=""):
-            _load_rows(q)
+        _load_rows()
 
-        refresh()
+        def _do_filter():
+            _load_rows(e_q.get())
 
-        def edit_comm():
-            sel = tree.selection()
-            if not sel:
-                messagebox.showinfo("Edit", "Select a commission to edit.", parent=top)
-                return
-            cid = int(sel[0])
-            try:
-                self.edit_commission(cid)
-            except Exception:
-                messagebox.showinfo("Edit", "Edit commission not implemented in UI.", parent=top)
+        # Wire toolbar filter button defensively
+        try:
+            b_search = [w for w in bar.winfo_children() if isinstance(w, ctk.CTkButton) and w.cget("text") == "Filter"][0]
+            b_search.configure(command=_do_filter)
+        except Exception:
+            pass
 
+        # --- Actions ---
         def _delete_selected():
             sel = tree.selection()
             if not sel:
@@ -4201,6 +4166,149 @@ class VoucherApp(ctk.CTk):
             self.open_vouchers_for_binding(cid)
             refresh(e_q.get())
 
+        # --- Edit dialog (opens for selected commission) ---
+        def edit_comm():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Edit", "Select a commission to edit.", parent=top)
+                return
+            cid = int(sel[0])
+
+            # Load commission
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT c.id, c.staff_id, s.name, c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.created_at
+                FROM commissions c
+                LEFT JOIN staffs s ON c.staff_id = s.id
+                WHERE c.id = ?
+            """, (cid,))
+            row = cur.fetchone()
+            conn.close()
+
+            if not row:
+                messagebox.showerror("Edit", "Commission record not found.", parent=top)
+                return
+
+            _id, staff_id, staff_name, bill_type, bill_no, total_amount, commission_amount, created_at = row
+
+            etop = ctk.CTkToplevel(self)
+            etop.title(f"Edit Commission {cid}")
+            etop.geometry("980x560")
+            etop.resizable(False, False)
+            etop.grab_set()
+
+            efrm = ctk.CTkFrame(etop)
+            efrm.pack(fill="both", expand=True, padx=12, pady=12)
+            for cc in range(4):
+                efrm.grid_columnconfigure(cc, weight=1)
+
+            # Staff (readonly)
+            ctk.CTkLabel(efrm, text="Staff").grid(row=0, column=0, sticky="w")
+            lbl_staff = ctk.CTkLabel(efrm, text=staff_name)
+            lbl_staff.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+
+            # Bill Type (use cb_type_edit consistently)
+            ctk.CTkLabel(efrm, text="Bill Type").grid(row=1, column=0, sticky="w")
+            cb_type_edit = ctk.CTkComboBox(efrm, values=["Cash Bill", "Invoice"], width=240)
+            cb_type_edit.set("Cash Bill" if (bill_type or "").upper() == "CS" else "Invoice")
+            cb_type_edit.grid(row=1, column=1, sticky="w", padx=8, pady=6)
+
+            # Bill No
+            ctk.CTkLabel(efrm, text="Bill No").grid(row=2, column=0, sticky="w")
+            e_bill = ctk.CTkEntry(efrm, width=520)
+            e_bill.insert(0, bill_no or "")
+            e_bill.grid(row=2, column=1, sticky="w", padx=8, pady=6)
+
+            # Total / Commission
+            ctk.CTkLabel(efrm, text="Total Amount (RM)").grid(row=3, column=0, sticky="w")
+            e_total = ctk.CTkEntry(efrm, width=200)
+            e_total.insert(0, str(total_amount or ""))
+            e_total.grid(row=3, column=1, sticky="w", padx=8, pady=6)
+
+            ctk.CTkLabel(efrm, text="Commission Amount").grid(row=4, column=0, sticky="w")
+            e_comm = ctk.CTkEntry(efrm, width=200)
+            e_comm.insert(0, str(commission_amount or ""))
+            e_comm.grid(row=4, column=1, sticky="w", padx=8, pady=6)
+
+            # Created (readonly)
+            ctk.CTkLabel(efrm, text="Created").grid(row=5, column=0, sticky="w")
+            lbl_created = ctk.CTkLabel(efrm, text=created_at or "")
+            lbl_created.grid(row=5, column=1, sticky="w", padx=8, pady=6)
+
+            # Buttons row
+            btns = ctk.CTkFrame(etop)
+            btns.pack(fill="x", padx=12, pady=(6, 12))
+
+            def _validate_bill_format(b):
+                s = (b or "").strip().upper()
+                bt = cb_type_edit.get()
+                if bt == "Cash Bill":
+                    return bool(BILL_RE_CS.match(s))
+                else:
+                    return bool(BILL_RE_INV.match(s))
+
+            def _save_edit():
+                new_bill_no = (e_bill.get() or "").strip().upper()
+                new_type = "CS" if cb_type_edit.get() == "Cash Bill" else "INV"
+                try:
+                    new_total = float(e_total.get()) if e_total.get().strip() != "" else None
+                    new_comm = float(e_comm.get()) if e_comm.get().strip() != "" else None
+                except Exception:
+                    messagebox.showerror("Invalid", "Amounts must be numeric.", parent=etop)
+                    return
+
+                if not new_bill_no:
+                    messagebox.showerror("Missing", "Bill number is required.", parent=etop)
+                    return
+
+                if not _validate_bill_format(new_bill_no):
+                    messagebox.showerror("Bill No.",
+                                         "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: INV-MMDD/XXXX",
+                                         parent=etop)
+                    return
+
+                # Duplicate check
+                conn_chk = get_conn()
+                cur_chk = conn_chk.cursor()
+                cur_chk.execute("SELECT id FROM commissions WHERE LOWER(bill_no) = LOWER(?) AND id <> ?", (new_bill_no, cid))
+                dup = cur_chk.fetchone()
+                conn_chk.close()
+                if dup:
+                    messagebox.showerror("Duplicate Bill",
+                                         f"This bill number ({new_bill_no}) already exists in the system.",
+                                         parent=etop)
+                    return
+
+                # Commit update
+                try:
+                    conn2 = get_conn()
+                    cur2 = conn2.cursor()
+                    cur2.execute("""
+                        UPDATE commissions
+                        SET bill_type=?, bill_no=?, total_amount=?, commission_amount=?, updated_at=?
+                        WHERE id=?
+                    """, (
+                        new_type, new_bill_no, new_total, new_comm,
+                        datetime.now().isoformat(sep=" ", timespec="seconds"), cid
+                    ))
+                    conn2.commit()
+                    conn2.close()
+                except sqlite3.IntegrityError:
+                    messagebox.showerror("Duplicate Bill", "This bill already exists (case-insensitive).", parent=etop)
+                    return
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to update commission:\n{e}", parent=etop)
+                    return
+
+                messagebox.showinfo("Updated", "Commission updated.", parent=etop)
+                etop.destroy()
+                _load_rows(e_q.get())
+
+            white_btn(btns, text="Cancel", width=120, command=etop.destroy).pack(side="right", padx=(6, 0))
+            white_btn(btns, text="Save Changes", width=140, command=_save_edit).pack(side="right")
+
+        # Single context menu (create AFTER edit_comm exists)
         try:
             comm_ctx = tk.Menu(tree, tearoff=0)
             comm_ctx.add_command(label="Edit", command=edit_comm)
@@ -4214,19 +4322,36 @@ class VoucherApp(ctk.CTk):
                         tree.selection_set(row)
                     comm_ctx.post(event.x_root, event.y_root)
                 finally:
-                    comm_ctx.grab_release()
+                    try:
+                        comm_ctx.grab_release()
+                    except Exception:
+                        pass
 
             tree.bind("<Button-3>", _comm_popup)
-        except Exception as e:
-            logger.exception("Caught exception", exc_info=e)
-            pass
+        except Exception:
+            logger.exception("Caught exception setting up commission context menu", exc_info=True)
 
-        tree.bind("<Double-1>", lambda e: edit_comm())
+        # Admin double-click: edit_comm
+        def _on_double(e=None):
+            if self.current_user and self.current_user.get("role") == "admin":
+                edit_comm()
+
+        tree.bind("<Double-1>", _on_double)
+
+        # helper to refresh
+        def refresh(q=""):
+            _load_rows(q)
+
+        # expose refresh reference
+        try:
+            self._refresh_commissions = refresh
+        except Exception:
+            pass
 
         try:
             top.update_idletasks()
-        except Exception as e:
-            logger.exception("Caught exception", exc_info=e)
+        except Exception:
+            logger.exception("Caught exception while updating idletasks", exc_info=True)
             pass
             
     def open_vouchers_for_binding(self, commission_id: int):
@@ -4340,7 +4465,7 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Bind", f"Voucher {vid} is already bound to commission id {ex[0]}.", parent=pick)
                 return
 
-            # Perform binding
+            # Perform binding using helper (handles column creation if needed)
             try:
                 bind_commission_to_voucher(cid, vid)
             except Exception as e:
@@ -4370,27 +4495,25 @@ class VoucherApp(ctk.CTk):
             finally:
                 try:
                     conn.close()
-                except Exception as e:
-                    logger.exception("Caught exception", exc_info=e)
+                except Exception:
                     pass
 
             messagebox.showinfo("Bound", f"Commission {cid} bound to Voucher {vid}.", parent=pick)
             try:
                 pick.destroy()
-            except Exception as e:
-                logger.exception("Caught exception", exc_info=e)
+            except Exception:
                 pass
 
             # Refresh main lists
             try:
                 self.perform_search()
-            except Exception as e:
-                logger.exception("Caught exception", exc_info=e)
+            except Exception:
                 pass
 
-        # Bind on double-click
+        # Bind on double-click -> bind
         tree.bind("<Double-1>", lambda e: _bind_to_selected())
 
+        # Buttons
         btns = ctk.CTkFrame(pick)
         btns.pack(fill="x", padx=8, pady=(6,8))
         white_btn(btns, text="Bind Selected", command=_bind_to_selected, width=140).pack(side="right", padx=(6,0))
@@ -4398,335 +4521,9 @@ class VoucherApp(ctk.CTk):
 
         try:
             pick.update_idletasks()
-        except Exception as e:
-            logger.exception("Caught exception", exc_info=e)
-            pass
-        
-        # Right-click context menu
-        try:
-            comm_ctx = tk.Menu(tree, tearoff=0)
-            comm_ctx.add_command(label="Edit", command=edit_comm)
-            comm_ctx.add_command(label="Bind to Voucher", command=bind_selected)
-            comm_ctx.add_command(label="Delete", command=_delete_selected)
-
-            def _comm_popup(event):
-                try:
-                    row = tree.identify_row(event.y)
-                    if row and row not in tree.selection():
-                        tree.selection_set(row)
-                    comm_ctx.post(event.x_root, event.y_root)
-                finally:
-                    comm_ctx.grab_release()
-
-            tree.bind("<Button-3>", _comm_popup)
-        except Exception as e: 
-            logger.exception("Caught exception", exc_info=e)
-            pass
-
-        # Double click opens edit
-        tree.bind("<Double-1>", lambda e: edit_comm())
-
-        # Keep the window responsive
-        try:
-            top.update_idletasks()
-        except Exception as e:
-            logger.exception("Caught exception", exc_info=e)
-            pass
-
-            # Load commission row and its amounts
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT id, staff_id, bill_type, bill_no, total_amount, commission_amount, voucher_id FROM commissions WHERE id=?", (cid,))
-            crow = cur.fetchone()
-            conn.close()
-            if not crow:
-                messagebox.showerror("Bind", "Commission record not found.")
-                return
-            _, staff_id, bill_type, bill_no, total_amount, commission_amount, bound_vid = crow
-            if bound_vid:
-                messagebox.showerror("Bind", f"This commission is already bound to voucher {bound_vid}.")
-                return
-
-            # Ask user for voucher ID to bind to
-            vid = simpledialog.askstring("Bind to Voucher", f"Enter Voucher ID to bind for bill {bill_no}:", parent=top)
-            if not vid:
-                return
-            vid = vid.strip()
-
-            # Validate voucher exists
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT voucher_id FROM vouchers WHERE voucher_id = ?", (vid,))
-            vrow = cur.fetchone()
-            conn.close()
-            if not vrow:
-                messagebox.showerror("Bind", f"Voucher {vid} does not exist.")
-                return
-
-            # Ensure this voucher is not already bound to another commission
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM commissions WHERE voucher_id = ?", (vid,))
-            existing = cur.fetchone()
-            conn.close()
-            if existing:
-                messagebox.showerror("Bind", f"Voucher {vid} is already bound to commission id {existing[0]}.")
-                return
-
-            # Perform binding using the helper (handles adding column if missing)
-            try:
-                bind_commission_to_voucher(cid, vid)
-            except Exception as e:
-                messagebox.showerror("Bind Failed", f"Failed to bind commission: {e}")
-                return
-
-            # After binding, also update the voucher row so edit_voucher page reads the bill, total and commission amounts.
-            try:
-                # Safely set ref_bill / amount_rm / tech_commission on the voucher if those columns exist
-                conn = get_conn()
-                cur = conn.cursor()
-                # Only update columns that exist (avoid migration issues)
-                cur.execute("PRAGMA table_info(vouchers)")
-                vcols = [r[1] for r in cur.fetchall()]
-                updates = []
-                params = []
-                if "ref_bill" in vcols and bill_no:
-                    updates.append("ref_bill=?"); params.append(bill_no)
-                if "amount_rm" in vcols and total_amount is not None:
-                    updates.append("amount_rm=?"); params.append(total_amount)
-                if "tech_commission" in vcols and commission_amount is not None:
-                    updates.append("tech_commission=?"); params.append(commission_amount)
-                if updates:
-                    params.append(vid)
-                    cur.execute(f"UPDATE vouchers SET {', '.join(updates)} WHERE voucher_id=?", params)
-                    conn.commit()
-            except Exception as e:
-                logger.exception("Failed to write commission amounts into voucher after binding", exc_info=e)
-            finally:
-                try:
-                    conn.close()
-                except Exception as e:
-                    logger.exception("Caught exception", exc_info=e)
-                    pass
-
-            messagebox.showinfo("Bound", f"Commission {cid} bound to Voucher {vid}.")
-            try:
-                refresh()
-            except Exception as e:
-                logger.exception("Caught exception", exc_info=e)
-                pass
-
-        # Add Bind button to toolbar (near Edit/Delete)
-        white_btn(bar, text="Bind Selected", width=140, command=bind_selected).pack(side="right", padx=5)
-
-        # Right-click context menu on tree for binding (same action)
-        try:
-            comm_ctx = tk.Menu(tree, tearoff=0)
-            comm_ctx.add_command(label="Bind to Voucher", command=bind_selected)
-
-            def _comm_popup(event):
-                try:
-                    row = tree.identify_row(event.y)
-                    if row and row not in tree.selection():
-                        tree.selection_set(row)
-                    comm_ctx.post(event.x_root, event.y_root)
-                finally:
-                    comm_ctx.grab_release()
-
-            tree.bind("<Button-3>", _comm_popup)
-        except Exception as e:
-            # If platform/menu fails, ignore gracefully
-            logger.exception("Caught exception", exc_info=e)
-            pass        
-        
-        def delete_sel():
-            # Extra guard: technicians cannot delete even if button is re-enabled somehow
-            if self.current_user and self.current_user.get("role") == "technician":
-                messagebox.showerror("Permission", "Technician role cannot delete commissions.")
-                return
-
-            sel = tree.selection()
-            if not sel:
-                return
-            cid = int(sel[0])
-            if not messagebox.askyesno("Delete", "Delete this commission record? This cannot be undone."):
-                return
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("DELETE FROM commissions WHERE id=?", (cid,))
-            conn.commit()
-            conn.close()
-            refresh()
-
-        # Local edit function so it can call refresh()
-        def _edit_selected():
-            # Permission guard
-            if not (self.current_user and self.current_user.get("role") == "admin"):
-                messagebox.showerror("Permission", "Only admin can edit commissions.")
-                return
-
-            sel = tree.selection()
-            if not sel:
-                messagebox.showinfo("Edit", "Select a commission to edit.")
-                return
-            cid = int(sel[0])
-
-            # Load commission
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT c.id, c.staff_id, s.name, c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.created_at
-                FROM commissions c
-                JOIN staffs s ON c.staff_id = s.id
-                WHERE c.id = ?
-            """, (cid,))
-            row = cur.fetchone()
-            conn.close()
-
-            if not row:
-                messagebox.showerror("Edit", "Commission record not found.")
-                return
-
-            _id, staff_id, staff_name, bill_type, bill_no, total_amount, commission_amount, created_at = row
-
-            # Build edit dialog
-            etop = ctk.CTkToplevel(self)
-            etop.title(f"Edit Commission {cid}")
-            # a bit taller so Save/Cancel row and fields are not cut off
-            etop.geometry("900x520")
-            etop.resizable(False, False)
-            etop.grab_set()
-
-            efrm = ctk.CTkFrame(etop)
-            efrm.pack(fill="both", expand=True, padx=12, pady=12)
-            for c in range(4):
-                efrm.grid_columnconfigure(c, weight=1)
-
-            # Staff (readonly)
-            ctk.CTkLabel(efrm, text="Staff").grid(row=0, column=0, sticky="w")
-            lbl_staff = ctk.CTkLabel(efrm, text=staff_name)
-            lbl_staff.grid(row=0, column=1, sticky="w", padx=8, pady=6)
-
-            # Bill Type
-            ctk.CTkLabel(efrm, text="Bill Type").grid(row=0, column=2, sticky="w")
-            cb_type = ctk.CTkComboBox(efrm, values=["Cash Bill", "Invoice Bill"], width=200)
-            cb_type.set("Cash Bill" if bill_type == "CS" else "Invoice Bill")
-            cb_type.grid(row=0, column=3, sticky="w", padx=8, pady=6)
-
-            # Bill No
-            ctk.CTkLabel(efrm, text="Bill No.").grid(row=1, column=0, sticky="w")
-            e_bill = ctk.CTkEntry(efrm)
-            e_bill.insert(0, bill_no or "")
-            e_bill.grid(row=1, column=1, sticky="ew", padx=8, pady=6)
-
-            # Total Amount
-            ctk.CTkLabel(efrm, text="Total Amount").grid(row=1, column=2, sticky="w")
-            e_total = ctk.CTkEntry(efrm)
-            e_total.insert(0, str(total_amount or ""))
-            e_total.grid(row=1, column=3, sticky="ew", padx=8, pady=6)
-
-            # Commission Amount
-            ctk.CTkLabel(efrm, text="Commission Amount").grid(row=2, column=0, sticky="w")
-            e_comm = ctk.CTkEntry(efrm)
-            e_comm.insert(0, str(commission_amount or ""))
-            e_comm.grid(row=2, column=1, sticky="ew", padx=8, pady=6)
-
-            # Created (readonly)
-            ctk.CTkLabel(efrm, text="Created").grid(row=2, column=2, sticky="w")
-            lbl_created = ctk.CTkLabel(efrm, text=created_at or "")
-            lbl_created.grid(row=2, column=3, sticky="w", padx=8, pady=6)
-
-            # Buttons
-            btns = ctk.CTkFrame(efrm)
-            btns.grid(row=5, column=0, columnspan=4, sticky="e", pady=(18, 0))
-
-            def _validate_bill_format(b):
-                s = (b or "").strip().upper()
-                bt = cb_type.get()
-                if bt == "Cash Bill":
-                    return bool(BILL_RE_CS.match(s))
-                else:
-                    return bool(BILL_RE_INV.match(s))
-
-            def _save_edit():
-                new_bill_no = (e_bill.get() or "").strip().upper()
-                new_type = "CS" if cb_type.get() == "Cash Bill" else "INV"
-                try:
-                    new_total = float(e_total.get()) if e_total.get().strip() != "" else None
-                    new_comm = float(e_comm.get()) if e_comm.get().strip() != "" else None
-                except Exception:
-                    messagebox.showerror("Invalid", "Amounts must be numeric.")
-                    return
-
-                if not new_bill_no:
-                    messagebox.showerror("Missing", "Bill number is required.")
-                    return
-
-                if not _validate_bill_format(new_bill_no):
-                    messagebox.showerror("Bill No.",
-                                         "Invalid bill number format.\nCash: CS-MMDD/XXXX\nInvoice: INV-MMDD/XXXX")
-                    return
-
-                # Global duplicate check (case-insensitive) - exclude current record id
-                conn_chk = get_conn()
-                cur_chk = conn_chk.cursor()
-                cur_chk.execute(
-                    "SELECT id FROM commissions WHERE LOWER(bill_no) = LOWER(?) AND id <> ?",
-                    (new_bill_no, cid)
-                )
-                dup = cur_chk.fetchone()
-                conn_chk.close()
-                if dup:
-                    messagebox.showerror("Duplicate Bill",
-                                         f"This bill number ({new_bill_no}) already exists in the system.")
-                    return
-
-                # Update DB
-                try:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("""
-                        UPDATE commissions
-                        SET bill_type=?, bill_no=?, total_amount=?, commission_amount=?, updated_at=?
-                        WHERE id=?
-                    """, (
-                        new_type, new_bill_no, new_total, new_comm,
-                        datetime.now().isoformat(sep=" ", timespec="seconds"), cid
-                    ))
-                    conn.commit()
-                    conn.close()
-                except sqlite3.IntegrityError:
-                    messagebox.showerror("Duplicate Bill", "This bill already exists (case-insensitive).")
-                    return
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to update commission:\n{e}")
-                    return
-
-                messagebox.showinfo("Updated", "Commission updated.")
-                etop.destroy()
-                refresh()
-
-            white_btn(btns, text="Cancel", width=120, command=etop.destroy).pack(side="right", padx=(6, 0))
-            white_btn(btns, text="Save Changes", width=140, command=_save_edit).pack(side="right")
-
-        # double-click to edit (admin only)
-        def _on_double(e=None):
-            if self.current_user and self.current_user.get("role") == "admin":
-                _edit_selected()
-
-        tree.bind("<Double-1>", _on_double)
-
-        refresh()
-
-    def _go_fullscreen(self):
-        try:
-            if sys.platform.startswith("win") or sys.platform.startswith("linux"):
-                self.state("zoomed")
-            else:
-                self.attributes("-fullscreen", True)
         except Exception:
-            self.attributes("-fullscreen", True)
-
+            logger.exception("Caught exception while updating voucher-picker idletasks", exc_info=True)
+            pass
 
 # ------------------ Modify Base VID (unchanged core) ------------------
 def modify_base_vid(new_base: int):
