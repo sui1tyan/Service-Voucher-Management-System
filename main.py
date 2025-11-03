@@ -1806,7 +1806,7 @@ class VoucherApp(ctk.CTk):
         self._build_table(root)
         self._build_bottom_bar(root)
 
-        self.after(80, self._go_fullscreen)
+        self.after(80, lambda: self._go_fullscreen())
         self.perform_search()
 
     def _do_login_flow(self):
