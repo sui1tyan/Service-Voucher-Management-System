@@ -9,6 +9,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
+import io
 from PIL import Image, ImageOps, ImageTk
 import bcrypt
 import logging
@@ -32,6 +33,27 @@ _handler.setFormatter(_formatter)
 if not logger.handlers:
     logger.addHandler(_handler)
 
+buf = io.BytesIO()
+qr_img.save(buf, format="PNG")
+buf.seek(0)
+
+# Create an ImageReader from the BytesIO
+img_reader = ImageReader(buf)
+
+# Create an ImageReader from the BytesIO
+img_reader = ImageReader(buf)
+
+# Now pass img_reader to reportlab canvas drawImage or drawInlineImage
+# Example:
+# x, y, w, h -> your coordinates/size
+try:
+    canvas.drawImage(img_reader, x, y, width=w, height=h, mask='auto')
+except Exception:
+    # fallback: attempt drawInlineImage (some versions)
+    try:
+        canvas.drawInlineImage(img_reader, x, y, w, h)
+    except Exception:
+        logger.exception("Failed to draw QR image into PDF")
 
 def get_conn():
     conn = sqlite3.connect(DB_FILE)
@@ -1623,6 +1645,8 @@ class LoginDialog(ctk.CTkToplevel):
                     pass
                 try:
                     self.destroy()
+                except tk.TclError:
+                    pass
                 except Exception as e:
                     logger.exception("Caught exception", exc_info=e)
                     pass
@@ -2472,41 +2496,69 @@ class VoucherApp(ctk.CTk):
 
         # Behavior: when bill type is "None", disable bill no entry
         def _on_bill_type_change(*_a):
-            bt = (bill_type_cb.get() or "").strip().upper()
-            if bt == "NONE":
+            """
+            Safely handle changes in bill type dropdown.
+            Enables/disables reference bill fields, and auto-prefixes new bill numbers.
+            Guards against cases where e_ref_bill or e_ref_bill_date may not exist.
+            """
+            try:
+                # Safely try to access widgets if they exist in this scope
                 try:
-                    e_ref_bill.delete(0, "end")
-                    e_ref_bill.configure(state="disabled")
-                    e_ref_bill_date.configure(state="disabled")
-                except Exception as e:
-                    logger.exception("Caught exception", exc_info=e)
-                    pass
-            else:
+                    ref_entry = e_ref_bill
+                except NameError:
+                    ref_entry = None
                 try:
-                    e_ref_bill.configure(state="normal")
-                    e_ref_bill_date.configure(state="normal")
-                    # auto prefix if empty or old prefix
-                    today = datetime.now()
-                    mm = f"{today.month:02d}"
-                    dd = f"{today.day:02d}"
-                    prefix = f"{bt}-{mm}{dd}/"
-                    curv = (e_ref_bill.get() or "").strip().upper()
-                    if not curv or re.match(r"^(CS|INV)-\d{4}/", curv, re.IGNORECASE):
-                        e_ref_bill.delete(0, "end")
-                        e_ref_bill.insert(0, prefix)
-                except Exception as e:
-                    logger.exception("Caught exception", exc_info=e)
-                    pass
+                    ref_date_entry = e_ref_bill_date
+                except NameError:
+                    ref_date_entry = None
 
+                # Get selected bill type
+                bt = (bill_type_cb.get() or "").strip().upper()
+
+                # If widgets not present, log once and return
+                if ref_entry is None or ref_date_entry is None:
+                    logger.debug("Skipped _on_bill_type_change: ref_entry or ref_date_entry missing")
+                    return
+
+                if bt == "NONE":
+                    # Disable both widgets
+                    try:
+                        ref_entry.delete(0, "end")
+                        ref_entry.configure(state="disabled")
+                        ref_date_entry.configure(state="disabled")
+                    except Exception as e:
+                        logger.exception("Caught exception disabling ref bill fields", exc_info=e)
+                        pass
+                else:
+                    # Enable both and auto-prefix if needed
+                    try:
+                        ref_entry.configure(state="normal")
+                        ref_date_entry.configure(state="normal")
+                        today = datetime.now()
+                        mm = f"{today.month:02d}"
+                        dd = f"{today.day:02d}"
+                        prefix = f"{bt}-{mm}{dd}/"
+                        curv = (ref_entry.get() or "").strip().upper()
+                        # Auto-prefix if blank or old prefix format
+                        if not curv or re.match(r"^(CS|INV)-\d{4}/", curv, re.IGNORECASE):
+                            ref_entry.delete(0, "end")
+                            ref_entry.insert(0, prefix)
+                    except Exception as e:
+                        logger.exception("Caught exception enabling/prefixing ref bill fields", exc_info=e)
+                        pass
+
+            except Exception as outer_e:
+                logger.exception("Caught outer exception in _on_bill_type_change", exc_info=outer_e)
+                pass
+
+        # Bind the combobox to the change handler
         try:
             bill_type_cb.configure(command=_on_bill_type_change)
         except Exception:
             bill_type_cb.bind("<<ComboboxSelected>>", lambda e: _on_bill_type_change())
-        _on_bill_type_change()
 
-        # Buttons (Add Voucher)
-        btns = ctk.CTkFrame(top)
-        btns.pack(fill="x", padx=12, pady=(6, 12))
+        # Run once at start to initialize field states
+        _on_bill_type_change()
 
         def save():
             name = e_name.get().strip()
