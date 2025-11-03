@@ -148,7 +148,7 @@ def validate_password_policy(pw: str) -> str | None:
 ALLOWED_ROLES = {"admin", "sales assistant", "technician", "user"}  # update this set to match your app
 USER_UPDATABLE_COLUMNS = {
     "username", "password_hash", "role", "must_change_pwd",
-    "full_name", "phone", "email", "note"
+    "is_active", "full_name", "phone", "email", "note"
 }
 # you'll likely have slightly different column names — adjust USER_UPDATABLE_COLUMNS accordingly.
 
@@ -2698,6 +2698,9 @@ class VoucherApp(ctk.CTk):
                 logger.exception("Failed to reset filters / refresh after voucher create", exc_info=True)
 
         # Add Save / Cancel buttons (were missing previously)
+        btns = ctk.CTkFrame(top)
+        btns.pack(fill="x", padx=12, pady=(6, 12))
+        
         white_btn(btns, text="Save", command=save, width=140).pack(side="right")
         white_btn(btns, text="Cancel", command=lambda: _on_close(), width=100).pack(side="right", padx=(0,8))
 
@@ -3000,7 +3003,15 @@ class VoucherApp(ctk.CTk):
         ctk.CTkLabel(frm, text="Bill Date (DD-MM-YYYY)").grid(row=r, column=0, sticky="w")
         e_ref_bill_date = ctk.CTkEntry(frm, width=180)
         if ref_bill_date:
-            e_ref_bill_date.insert(0, _to_ui_date(datetime.strptime(ref_bill_date, "%Y-%m-%d") ) if isinstance(ref_bill_date, str) and _from_ui_date_to_sqldate(_to_ui_date(datetime.now())) else (ref_bill_date or ""))
+            try:
+                if isinstance(ref_bill_date, str):
+                    dt = datetime.strptime(ref_bill_date, "%Y-%m-%d")
+                    e_ref_bill_date.insert(0, _to_ui_date(dt))
+                else:
+                    e_ref_bill_date.insert(0, str(ref_bill_date))
+            except Exception:
+                # fallback: show raw (or blank)
+                e_ref_bill_date.insert(0, str(ref_bill_date or ""))
         else:
             e_ref_bill_date.insert(0, _to_ui_date(datetime.now()))
         e_ref_bill_date.grid(row=r, column=1, sticky="w", padx=10, pady=6)
@@ -3681,14 +3692,8 @@ class VoucherApp(ctk.CTk):
                         messagebox.showerror("Missing", "Password required for new user.", parent=dlg)
                         return
                     try:
-                        create_user(uname, role, pwd)
-                        # if must_change, set flag
-                        if must:
-                            # find user id and set must_change flag
-                            for u in list_users():
-                                if u[1] == uname:
-                                    update_user(u[0], must_change=1)
-                                    break
+                        # create_user(username, password, role=..., must_change_pwd=...)
+                        create_user(uname, pwd, role=role, must_change_pwd=1 if must else 0)
                         messagebox.showinfo("Added", "User created.", parent=dlg)
                     except Exception as e:
                         messagebox.showerror("Add failed", f"{e}", parent=dlg)
@@ -3696,7 +3701,7 @@ class VoucherApp(ctk.CTk):
                 else:
                     # edit mode: update role and must_change (password change optional)
                     try:
-                        update_user(user_id, role=role, must_change=must)
+                        update_user(user_id, role=role, must_change_pwd=1 if must else 0)
                         if pwd:
                             reset_password(user_id, pwd)
                         messagebox.showinfo("Updated", "User updated.", parent=dlg)
