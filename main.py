@@ -1182,22 +1182,40 @@ def bulk_update_status(voucher_ids, new_status):
     conn.commit();
     conn.close()
 
+def _parse_ui_date_to_iso(d: str):
+    """
+    Convert a date string from UI into YYYY-MM-DD for SQLite DATE() comparisons.
+    Accepts:
+      - DD-MM-YYYY  -> converts to YYYY-MM-DD
+      - D-M-YYYY    -> converts (single-digit day/month)
+      - YYYY-MM-DD  -> returned as-is
+      - empty/invalid -> returns empty string
+    """
+    if not d:
+        return ""
+    s = d.strip()
+    # If already ISO-ish (YYYY-...), return as-is
+    m_iso = re.match(r"^\d{4}-\d{2}-\d{2}$", s)
+    if m_iso:
+        return s
+    # Try DD-MM-YYYY or D-M-YYYY
+    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", s)
+    if m:
+        dd, mm, yyyy = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+        return f"{yyyy}-{mm}-{dd}"
+    # Unknown format -> return empty string to avoid broken DATE(...) comparisons
+    return ""
+
 def _build_search_sql(filters: dict):
     """
     Build SQL and params from the given filters dictionary.
 
-    Normalizes status comparisons (trim + lower) so DB values like
-    ' Pending', 'pending', 'PENDING' will match correctly.
-
-    Supported keys in `filters`:
-      - voucher_id (partial match)
-      - customer_name (partial, case-insensitive)
-      - contact_number (partial)
-      - status (string, 'All' means no status filter)
-      - status_list (iterable of statuses) -- whitelist takes precedence over single status
-      - date_from, date_to (ISO or DD-MM-YYYY depending on your UI; code uses them directly)
-      - limit (int), offset (int)
+    Defensive: normalize status, parse UI dates (DD-MM-YYYY -> YYYY-MM-DD),
+    and handle status_list, limit/offset and numeric ordering on voucher_id.
     """
+    # defensive default
+    filters = filters or {}
+
     sql = "SELECT * FROM vouchers WHERE 1=1"
     params = []
 
@@ -1222,7 +1240,6 @@ def _build_search_sql(filters: dict):
     # status_list (whitelisted already) - takes precedence if provided and non-empty
     status_list = filters.get("status_list")
     if status_list:
-        # normalize and remove empty entries
         status_list_normalized = [s.strip().lower() for s in status_list if (s or "").strip()]
         if status_list_normalized:
             placeholders = ",".join("?" for _ in status_list_normalized)
@@ -1235,13 +1252,16 @@ def _build_search_sql(filters: dict):
             sql += " AND LOWER(TRIM(status)) = ?"
             params.append(status_raw.lower())
 
-    # date filters (use only the date part)
-    date_from = (filters.get("date_from") or "").strip()
+    # date filters: convert UI-formatted dates (DD-MM-YYYY) into ISO (YYYY-MM-DD)
+    date_from_raw = (filters.get("date_from") or "").strip()
+    date_to_raw = (filters.get("date_to") or "").strip()
+
+    date_from = _parse_ui_date_to_iso(date_from_raw)
+    date_to = _parse_ui_date_to_iso(date_to_raw)
+
     if date_from:
         sql += " AND DATE(created_at) >= DATE(?)"
         params.append(date_from)
-
-    date_to = (filters.get("date_to") or "").strip()
     if date_to:
         sql += " AND DATE(created_at) <= DATE(?)"
         params.append(date_to)
@@ -1252,7 +1272,6 @@ def _build_search_sql(filters: dict):
         numeric_vid_expr = _safe_voucher_int_expr("voucher_id")  # your helper
         sql += f" ORDER BY {numeric_vid_expr} DESC, voucher_id DESC"
     except Exception:
-        # fallback to ordering by created_at (most-recent first)
         sql += " ORDER BY created_at DESC"
 
     # limit / offset
@@ -1265,8 +1284,7 @@ def _build_search_sql(filters: dict):
             sql += " OFFSET ?"
             params.append(offset)
     elif isinstance(offset, int) and offset > 0:
-        # sqlite requires LIMIT when OFFSET is used; use large LIMIT to emulate "OFFSET only"
-        sql += " LIMIT -1 OFFSET ?"  # sqlite accepts LIMIT -1 OFFSET N
+        sql += " LIMIT -1 OFFSET ?"
         params.append(offset)
 
     return sql, params
