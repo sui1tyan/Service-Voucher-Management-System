@@ -1182,93 +1182,82 @@ def bulk_update_status(voucher_ids, new_status):
     conn.commit();
     conn.close()
 
-def _build_search_sql(search_params):
+def _build_search_sql(filters: dict):
     """
-    Build parameterized SQL and params for searching vouchers.
-    Returns (sql, params) where SQL selects the columns used by perform_search.
+    Build SQL and params from the given filters dictionary.
+
+    Normalizes status comparisons (trim + lower) so DB values like
+    ' Pending', 'pending', 'PENDING' will match correctly.
+
+    Supported keys in `filters`:
+      - voucher_id (partial match)
+      - customer_name (partial, case-insensitive)
+      - contact_number (partial)
+      - status (string, 'All' means no status filter)
+      - status_list (iterable of statuses) -- whitelist takes precedence over single status
+      - date_from, date_to (ISO or DD-MM-YYYY depending on your UI; code uses them directly)
+      - limit (int), offset (int)
     """
-    search_params = search_params or {}
-    # Base select - explicit columns so callers can unpack predictably
-    sql = """
-      SELECT voucher_id, created_at, customer_name, contact_number, units,
-             recipient, technician_id, technician_name, status, solution, pdf_path
-      FROM vouchers
-      WHERE 1=1
-    """
+    sql = "SELECT * FROM vouchers WHERE 1=1"
     params = []
 
-    # voucher_id exact or wildcard
-    vid = (search_params.get("voucher_id") or "").strip()
+    # voucher id (partial)
+    vid = (filters.get("voucher_id") or "").strip()
     if vid:
-        if "%" in vid or "*" in vid:
-            vid_sql = vid.replace("*", "%")
-            sql += " AND voucher_id LIKE ?"
-            params.append(vid_sql)
-        else:
-            sql += " AND voucher_id = ?"
-            params.append(vid)
+        sql += " AND voucher_id LIKE ?"
+        params.append(f"%{vid}%")
 
-    # customer name supports both 'customer_name' and 'name' keys
-    cust = search_params.get("customer_name") or search_params.get("name")
-    if cust:
+    # customer name (case-insensitive)
+    cname = (filters.get("customer_name") or "").strip()
+    if cname:
         sql += " AND LOWER(customer_name) LIKE ?"
-        params.append(f"%{cust.strip().lower()}%")
+        params.append(f"%{cname.lower()}%")
 
-    # contact / phone -> use contact_number column
-    phone_input = search_params.get("phone") or search_params.get("contact")
-    if phone_input:
-        # Try to normalize; if normalize produces +CC..., search the digits only
-        norm_phone_search = normalize_phone(phone_input, default_cc="60")
-        if norm_phone_search:
-            # search digits-only part
-            params.append(f"%{norm_phone_search.lstrip('+')}%")
-            sql += " AND REPLACE(REPLACE(REPLACE(contact_number, '+', ''), '-', ''), ' ', '') LIKE ?"
-        else:
-            sql += " AND contact_number LIKE ?"
-            params.append(f"%{phone_input}%")
+    # contact (partial)
+    contact = (filters.get("contact_number") or "").strip()
+    if contact:
+        sql += " AND contact_number LIKE ?"
+        params.append(f"%{contact}%")
 
-    # technician partial
-    tech = search_params.get("technician")
-    if tech:
-        sql += " AND LOWER(technician_name) LIKE ?"
-        params.append(f"%{tech.strip().lower()}%")
+    # status_list (whitelisted already) - takes precedence if provided and non-empty
+    status_list = filters.get("status_list")
+    if status_list:
+        # normalize and remove empty entries
+        status_list_normalized = [s.strip().lower() for s in status_list if (s or "").strip()]
+        if status_list_normalized:
+            placeholders = ",".join("?" for _ in status_list_normalized)
+            sql += f" AND LOWER(TRIM(status)) IN ({placeholders})"
+            params.extend(status_list_normalized)
+    else:
+        # status: treat "all" (case-insensitive) as no-filter
+        status_raw = (filters.get("status") or "").strip()
+        if status_raw and status_raw.lower() != "all":
+            sql += " AND LOWER(TRIM(status)) = ?"
+            params.append(status_raw.lower())
 
-    # status normalization helper
-    status_fragment, status_params = normalize_status_for_search(
-        search_params.get("status"), fuzzy_status=bool(search_params.get("fuzzy_status", False))
-    )
-    if status_fragment:
-        sql += " " + status_fragment
-        params.extend(status_params)
-
-    # date range against created_at (YYYY-MM-DD)
-    date_from = search_params.get("date_from")
-    date_to = search_params.get("date_to")
+    # date filters (use only the date part)
+    date_from = (filters.get("date_from") or "").strip()
     if date_from:
-        sql += " AND date(created_at) >= date(?)"
+        sql += " AND DATE(created_at) >= DATE(?)"
         params.append(date_from)
+
+    date_to = (filters.get("date_to") or "").strip()
     if date_to:
-        sql += " AND date(created_at) <= date(?)"
+        sql += " AND DATE(created_at) <= DATE(?)"
         params.append(date_to)
 
-    # status_list (whitelisted already)
-    if search_params.get("status_list"):
-        status_list = [s.strip().lower() for s in search_params.get("status_list") if s.strip()]
-        if status_list:
-            placeholders = ",".join("?" for _ in status_list)
-            sql += f" AND LOWER(status) IN ({placeholders})"
-            params.extend(status_list)
-
-    # ordering: try numeric voucher_id ordering using your helper
+    # ordering: prefer numeric ordering on voucher_id (if helper available),
+    # otherwise use created_at DESC then voucher_id DESC
     try:
-        numeric_vid_expr = _safe_voucher_int_expr("voucher_id")
+        numeric_vid_expr = _safe_voucher_int_expr("voucher_id")  # your helper
         sql += f" ORDER BY {numeric_vid_expr} DESC, voucher_id DESC"
     except Exception:
-        sql += " ORDER BY voucher_id DESC"
+        # fallback to ordering by created_at (most-recent first)
+        sql += " ORDER BY created_at DESC"
 
     # limit / offset
-    limit = search_params.get("limit")
-    offset = search_params.get("offset")
+    limit = filters.get("limit")
+    offset = filters.get("offset")
     if isinstance(limit, int) and limit > 0:
         sql += " LIMIT ?"
         params.append(limit)
@@ -1276,15 +1265,24 @@ def _build_search_sql(search_params):
             sql += " OFFSET ?"
             params.append(offset)
     elif isinstance(offset, int) and offset > 0:
-        sql += " LIMIT -1 OFFSET ?"
+        # sqlite requires LIMIT when OFFSET is used; use large LIMIT to emulate "OFFSET only"
+        sql += " LIMIT -1 OFFSET ?"  # sqlite accepts LIMIT -1 OFFSET N
         params.append(offset)
 
     return sql, params
 
-def search_vouchers(filters):
-    conn = get_conn();
+def search_vouchers(filters: dict):
+    conn = get_conn()
     cur = conn.cursor()
     sql, params = _build_search_sql(filters)
+
+    # Debug: log SQL and params so we can inspect why rows might be missing
+    try:
+        logger.debug("search_vouchers SQL: %s", sql)
+        logger.debug("search_vouchers params: %r", params)
+    except Exception:
+        pass
+
     cur.execute(sql, params)
     rows = cur.fetchall()
     conn.close()
