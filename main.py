@@ -2606,10 +2606,21 @@ class VoucherApp(ctk.CTk):
                 _on_close()
             except Exception:
                 pass
+
+            # --- Ensure UI shows the newly created voucher:
+            # Reset filter inputs (clears date / name / contact filters) then refresh table.
             try:
-                self.perform_search()
+                # Reset filters so newly created voucher is not hidden by an active filter
+                try:
+                    self.reset_filters()
+                except Exception:
+                    # Fallback: perform a direct refresh if reset_filters not available
+                    try:
+                        self.perform_search()
+                    except Exception:
+                        pass
             except Exception:
-                pass
+                logger.exception("Failed to reset filters / refresh after voucher create", exc_info=True)
 
         # Add Save / Cancel buttons (were missing previously)
         white_btn(btns, text="Save", command=save, width=140).pack(side="right")
