@@ -4,7 +4,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from tkinter import simpledialog
 import customtkinter as ctk
-import qrcode
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.units import mm
@@ -32,28 +31,6 @@ _formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"
 _handler.setFormatter(_formatter)
 if not logger.handlers:
     logger.addHandler(_handler)
-
-buf = io.BytesIO()
-qr_img.save(buf, format="PNG")
-buf.seek(0)
-
-# Create an ImageReader from the BytesIO
-img_reader = ImageReader(buf)
-
-# Create an ImageReader from the BytesIO
-img_reader = ImageReader(buf)
-
-# Now pass img_reader to reportlab canvas drawImage or drawInlineImage
-# Example:
-# x, y, w, h -> your coordinates/size
-try:
-    canvas.drawImage(img_reader, x, y, width=w, height=h, mask='auto')
-except Exception:
-    # fallback: attempt drawInlineImage (some versions)
-    try:
-        canvas.drawInlineImage(img_reader, x, y, w, h)
-    except Exception:
-        logger.exception("Failed to draw QR image into PDF")
 
 def get_conn():
     conn = sqlite3.connect(DB_FILE)
@@ -1032,17 +1009,6 @@ def _draw_policies_and_signatures(c, left, right, bottom_table, left_col_w, reci
     used_h = draw_wrapped_top(c, "NO ATTENTION GIVEN WITHOUT SERVICE VOUCHER", left, y_cursor, policies_w, fontsize=8,
                               leading=10)
     policies_bottom = y_cursor - used_h
-
-    qr_size = 20 * mm
-    try:
-        qr_data = f"Voucher:{voucher_id}|Name:{customer_name}|Tel:{contact_number}|Date:{date_str}"
-        qr_img = qrcode.make(qr_data)
-        qr_x = right - qr_size
-        qr_y = max(policies_bottom + 3 * mm, 10 * mm + qr_size)
-        c.drawImage(ImageReader(qr_img), qr_x, qr_y - qr_size, qr_size, qr_size)
-    except Exception as e:
-        logger.exception("Caught exception", exc_info=e)
-        pass
 
     SIG_LINE_W = 45 * mm;
     SIG_GAP = 6 * mm
