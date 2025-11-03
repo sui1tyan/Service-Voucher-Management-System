@@ -507,48 +507,50 @@ def normalize_status_for_search(raw_status, fuzzy_status=False):
 def init_db(db_path=DB_FILE):
     """
     Initialize DB and run safe migrations.
-    - Creates a timestamped DB backup before destructive changes.
+    - Creates a timestamped DB backup before destructive changes (if helper exists).
     - Ensures users table migration (adds 'sales assistant' role).
     - Adds missing voucher columns safely.
     - Ensures commissions schema (voucher_id column) via ensure_commissions_schema.
     - Creates useful indices and enforces uniqueness after cleaning legacy duplicates.
-    - Creates a default admin account if none exists (temporarily forces password change).
+    - Creates a default admin account if none exists (may force password change).
     Returns sqlite3.Connection on success.
     Raises on failure.
     """
     conn = None
+    try:
+        # Open connection early so we can run scripts and PRAGMAs safely
+        conn = sqlite3.connect(db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Apply base schema (idempotent). Run inside try/except so we continue if it fails.
         try:
-            # BASE_SCHEMA is the multi-statement string defined in your module
             cur.executescript(BASE_SCHEMA)
             conn.commit()
         except Exception:
             logger.exception("Failed to apply BASE_SCHEMA (continuing)")
-        try:
-            import secrets  # local import so top-level imports need not change
-            conn = sqlite3.connect(db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
 
-        # --- helper: safe numeric voucher expression used in deletes/ordering ---
+        # Helper to safely cast voucher_id to integer for ordering/de-dup purposes
         def _safe_vid_expr(col_name="voucher_id"):
-            # Use the CASE ... GLOB expression to avoid casting non-numeric values
             return f"CASE WHEN {col_name} GLOB '[0-9]*' THEN CAST({col_name} AS INTEGER) ELSE NULL END"
 
         # --- MIGRATION: ensure users.role allows 'sales assistant' ---
         try:
-            # Read current users table ddl
             cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
             row = cur.fetchone()
             ddl = (row[0] or "") if row else ""
             if "sales assistant" not in ddl:
-                # backup before destructive rename/drop
+                # attempt backup if available
                 try:
                     if "_ensure_db_backup" in globals():
-                        _ensure_db_backup(cur)
+                        try:
+                            _ensure_db_backup(cur)
+                        except Exception:
+                            logger.exception("Failed to create DB backup before users table migration")
                 except Exception:
-                    logger.exception("Failed to create DB backup before users table migration")
+                    logger.exception("Unexpected error invoking backup helper before users migration")
 
-                # rename, recreate, copy, drop old table
+                # Rename and recreate users table with sales assistant role allowed
                 cur.execute("ALTER TABLE users RENAME TO users_old")
                 cur.execute("""
                     CREATE TABLE users (
@@ -576,7 +578,7 @@ def init_db(db_path=DB_FILE):
         except Exception:
             logger.exception("users table migration failed; check DB state")
 
-        # --- Normalization / small update safe-run ---
+        # Trim status whitespace (safe no-op if column missing)
         try:
             cur.execute("UPDATE vouchers SET status = TRIM(status)")
             conn.commit()
@@ -597,12 +599,12 @@ def init_db(db_path=DB_FILE):
         ]
         for col, typ in voucher_columns:
             try:
-                if not _column_exists(cur, "vouchers", col):
-                    # Use add_column_safe if present for validation/whitelist
+                cur.execute(f"PRAGMA table_info(vouchers)")
+                existing_cols = [r[1] for r in cur.fetchall()]
+                if col not in existing_cols:
                     if "add_column_safe" in globals():
                         add_column_safe(cur, "vouchers", col, typ)
                     else:
-                        # Fallback with a basic sanity check on identifier
                         if not re.match(r"^[A-Za-z0-9_]+$", col):
                             raise ValueError(f"Unsafe column name: {col}")
                         cur.execute(f"ALTER TABLE vouchers ADD COLUMN {col} {typ}")
@@ -614,18 +616,16 @@ def init_db(db_path=DB_FILE):
         except Exception:
             logger.exception("commit failed after adding voucher columns")
 
-        # --- Ensure commissions schema (voucher_id column) once, not inside a loop ---
+        # --- Ensure commissions schema (voucher_id column) ---
         try:
             if "ensure_commissions_schema" in globals():
                 ok = ensure_commissions_schema(conn)
                 if not ok:
                     logger.warning("ensure_commissions_schema reported failure. Check DB and logs.")
-            else:
-                logger.debug("ensure_commissions_schema not present; skipping commissions schema check")
         except Exception:
             logger.exception("ensure_commissions_schema call failed during init_db()")
 
-        # --- Indexes and uniqueness constraints; clean legacy duplicates safely ---
+        # --- Indexes and uniqueness constraints; create non-unique indexes ---
         try:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_created ON vouchers(created_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_status ON vouchers(status)")
@@ -634,17 +634,15 @@ def init_db(db_path=DB_FILE):
         except Exception:
             logger.exception("Failed creating non-unique indexes; continuing")
 
-        # Clean legacy duplicates for ref_bill before creating UNIQUE index.
-        # This is destructive -> do a backup and run inside a transaction.
+        # --- Clean legacy duplicates for vouchers.ref_bill (destructive) ---
         try:
-            if "_ensure_db_backup" in globals():
-                _ensure_db_backup(cur)
-        except Exception:
-            logger.exception("Failed to create DB backup before cleaning vouchers.ref_bill duplicates")
+            try:
+                if "_ensure_db_backup" in globals():
+                    _ensure_db_backup(cur)
+            except Exception:
+                logger.exception("Failed to create DB backup before cleaning vouchers.ref_bill duplicates")
 
-        try:
             cur.execute("BEGIN")
-            # Use safe numeric expression for voucher ordering in subquery:
             safe_vid = _safe_vid_expr("voucher_id")
             cur.execute(f"""
                 DELETE FROM vouchers
@@ -664,7 +662,7 @@ def init_db(db_path=DB_FILE):
             except Exception:
                 pass
 
-        # Now create the unique index for ref_bill (case-insensitive)
+        # Create unique index for ref_bill
         try:
             cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_ref_bill_unique_ci
@@ -675,14 +673,14 @@ def init_db(db_path=DB_FILE):
         except Exception:
             logger.exception("Failed creating unique index for vouchers.ref_bill; check duplicates/logs")
 
-        # Clean legacy duplicates for commissions (destructive) - backup already attempted above.
+        # --- Clean legacy duplicates for commissions ---
         try:
-            if "_ensure_db_backup" in globals():
-                _ensure_db_backup(cur)
-        except Exception:
-            logger.exception("Failed to create DB backup before cleaning commissions duplicates")
+            try:
+                if "_ensure_db_backup" in globals():
+                    _ensure_db_backup(cur)
+            except Exception:
+                logger.exception("Failed to create DB backup before cleaning commissions duplicates")
 
-        try:
             cur.execute("BEGIN")
             cur.execute("""
                 DELETE FROM commissions
@@ -715,21 +713,22 @@ def init_db(db_path=DB_FILE):
         # --- Ensure base_vid setting exists ---
         try:
             _get_setting(cur, "base_vid", DEFAULT_BASE_VID)
+            conn.commit()
         except Exception:
             logger.exception("Failed to ensure base_vid setting")
 
-        # --- Ensure at least one admin user exists; create default admin if none ---
+        # --- Ensure at least one admin user exists; create default if none ---
         try:
             cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
             admin_count = cur.fetchone()[0]
             if admin_count == 0:
-                DEFAULT_ADMIN_USERNAME = "tonycom"
-                DEFAULT_ADMIN_PWD = "admin123"   # requested default
+                # Use module-level defaults if present
+                default_user = globals().get("DEFAULT_ADMIN_USERNAME", "tonycom")
+                default_pwd = globals().get("DEFAULT_ADMIN_PASSWORD", "admin123")
 
-                # validate against policy; if fails, require change on first login
                 must_change = 0
                 try:
-                    policy_err = validate_password_policy(DEFAULT_ADMIN_PWD)
+                    policy_err = validate_password_policy(default_pwd)
                     if policy_err:
                         must_change = 1
                         logger.warning(
@@ -738,28 +737,28 @@ def init_db(db_path=DB_FILE):
                             policy_err
                         )
                 except Exception:
-                    # if validator throws, be conservative and force change
                     must_change = 1
                     logger.exception("validate_password_policy raised exception; setting must_change_pwd=1")
 
                 ts = datetime.now().isoformat(sep=' ', timespec='seconds')
                 try:
-                    hashed = _hash_pwd(DEFAULT_ADMIN_PWD)
+                    hashed = _hash_pwd(default_pwd)
                     cur.execute(
-                        "INSERT INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-                        (DEFAULT_ADMIN_USERNAME, "admin", hashed, must_change, ts, ts)
+                        "INSERT OR IGNORE INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                        (default_user, "admin", hashed, must_change, ts, ts)
                     )
                     conn.commit()
                     if must_change:
-                        logger.warning("Default admin '%s' created; user must change password at first login.", DEFAULT_ADMIN_USERNAME)
+                        logger.warning("Default admin '%s' created; user must change password at first login.", default_user)
                     else:
-                        logger.info("Default admin '%s' created with default password.", DEFAULT_ADMIN_USERNAME)
+                        logger.info("Default admin '%s' created with default password.", default_user)
                 except sqlite3.IntegrityError:
-                    # Already exists - ignore (race)
+                    # Already exists - ignore
                     logger.info("Admin user already exists (race or unique constraint).")
+                except Exception:
+                    logger.exception("Failed to create default admin user.")
         except Exception:
             logger.exception("Failed to ensure default admin user")
-
 
         # All migrations completed successfully; return the live connection
         return conn
