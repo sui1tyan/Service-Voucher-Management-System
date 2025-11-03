@@ -1044,7 +1044,6 @@ def generate_pdf(voucher_id, customer_name, contact_number, units,
     c.save()
     return filename
 
-
 # ------------------ DB ops (vouchers) ------------------
 def add_voucher(
     customer_name,
@@ -1204,7 +1203,11 @@ def _build_search_sql(filters: dict):
     # defensive default
     filters = filters or {}
 
-    sql = "SELECT * FROM vouchers WHERE 1=1"
+    sql = (
+        "SELECT voucher_id, created_at, customer_name, contact_number, units, "
+        "recipient, technician_id, technician_name, status, solution, pdf_path "
+        "FROM vouchers WHERE 1=1"
+    )
     params = []
 
     # voucher id (partial)
@@ -1600,28 +1603,48 @@ class LoginDialog(ctk.CTkToplevel):
                 messagebox.showinfo("Password Changed",
                                     "Your password has been changed.\nThe application will restart now.",
                                     parent=self)
+                # Safe window teardown + restart flow
                 try:
-                    self.grab_release()
-                except Exception:
-                    logger.exception("Failed to release grab during restart", exc_info=True)
-                try:
-                    if self.master is not None:
-                        self.master.destroy()
+                    try:
+                        self.grab_release()
+                    except Exception:
+                        logger.debug("grab_release failed (ignorable)")
                 except Exception:
                     pass
+
+                # Close main window safely (if it still exists)
                 try:
-                    self.destroy()
+                    if getattr(self, "master", None) is not None:
+                        try:
+                            if hasattr(self.master, "winfo_exists") and self.master.winfo_exists():
+                                self.master.destroy()
+                        except Exception:
+                            # master already gone or cannot be destroyed; ignore
+                            logger.debug("master destroy failed or already destroyed")
+                except Exception:
+                    logger.exception("Unexpected when destroying master during password change")
+
+                # destroy the dialog itself (safe)
+                try:
+                    if hasattr(self, "winfo_exists") and self.winfo_exists():
+                        self.destroy()
                 except tk.TclError:
-                    pass
-                except Exception as e:
-                    logger.exception("Caught exception", exc_info=e)
-                    pass
+                    # application may be shutting down; ignore
+                    logger.debug("dialog destroy raised TclError (ignorable)")
+                except Exception:
+                    logger.exception("Unexpected when destroying login dialog")
+
+                # restart app (this will re-launch)
                 restart_app()
                 return
 
-        # Success path: set result and close dialog
+        # Success path: set result and close dialog safely
         self.result = {"id": uid, "username": username, "role": role}
-        self.destroy()
+        try:
+            if hasattr(self, "winfo_exists") and self.winfo_exists():
+                self.destroy()
+        except Exception:
+            logger.exception("Failed destroying login dialog on success (ignorable)")
 
 def white_btn(parent, **kwargs):
     kwargs.setdefault("fg_color", "white")
@@ -2016,13 +2039,24 @@ class VoucherApp(ctk.CTk):
         tree.bind("<Button-3>", _popup)
 
     def _get_filters(self):
+        """
+        Return a filters dict compatible with _build_search_sql:
+          - voucher_id
+          - customer_name
+          - contact_number
+          - date_from (UI DD-MM-YYYY)  <-- _build_search_sql will call _parse_ui_date_to_iso
+          - date_to
+          - status
+        """
         return {
-            "voucher_id": self.f_voucher.get().strip(),
-            "name": self.f_name.get().strip(),
-            "contact": normalize_phone(self.f_contact.get()),
-            "date_from": _from_ui_date_to_sqldate(self.f_from.get().strip()),
-            "date_to": _from_ui_date_to_sqldate(self.f_to.get().strip()),
-            "status": (self.f_status.get() or "").strip(),  # trim
+            "voucher_id": (self.f_voucher.get() or "").strip(),
+            "customer_name": (self.f_name.get() or "").strip(),
+            # pass raw contact text (search will use LIKE). If you want normalized matching,
+            # use normalize_phone(...) but be aware normalized stored values may differ.
+            "contact_number": (self.f_contact.get() or "").strip(),
+            "date_from": (self.f_from.get() or "").strip(),
+            "date_to": (self.f_to.get() or "").strip(),
+            "status": (self.f_status.get() or "").strip(),
         }
 
     def reset_filters(self):
@@ -2036,20 +2070,26 @@ class VoucherApp(ctk.CTk):
         rows = search_vouchers(self._get_filters())
         self.tree.delete(*self.tree.get_children())
         now = datetime.now()
-        for (
-                vid,
-                created_at,
-                customer,
-                contact,
-                units,
-                recipient,
-                tech_id,
-                tech_name,
-                status,
-                solution,
-                pdf,
-        ) in rows:
-            tags = [status]
+
+        for row in rows:
+            # row expected: (voucher_id, created_at, customer_name, contact_number, units,
+            #                recipient, technician_id, technician_name, status, solution, pdf_path)
+            # be defensive about length and None values
+            (vid, created_at, customer, contact, units, recipient,
+             tech_id, tech_name, status, solution, pdf) = tuple(list(row) + [""] * (11 - len(row)))
+
+            status = status or ""
+            customer = customer or ""
+            contact = contact or ""
+            units = units or 1
+            recipient = recipient or ""
+            tech_id = tech_id or ""
+            tech_name = tech_name or ""
+            solution = solution or ""
+            pdf = pdf or ""
+
+            tags = [status] if status else []
+
             try:
                 dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
             except Exception:
@@ -2062,6 +2102,7 @@ class VoucherApp(ctk.CTk):
                     tags.append("out_14")
                 else:
                     tags.append("out_30")
+
             self.tree.insert(
                 "",
                 "end",
@@ -2071,12 +2112,12 @@ class VoucherApp(ctk.CTk):
                     customer,
                     contact,
                     units,
-                    recipient or "",
-                    tech_id or "",
-                    tech_name or "",
+                    recipient,
+                    tech_id,
+                    tech_name,
                     status,
-                    solution or "",
-                    pdf or "",
+                    solution,
+                    pdf,
                 ),
                 tags=tuple(tags),
             )
@@ -4569,6 +4610,52 @@ class VoucherApp(ctk.CTk):
         except Exception:
             logger.exception("Caught exception while updating voucher-picker idletasks", exc_info=True)
             pass
+
+    def _go_fullscreen(self):
+        """
+        Safe fullscreen toggler called after startup.
+        Leaves app as normal window on platforms where fullscreen is undesired.
+        """
+        try:
+            # try a gentle fullscreen: maximize window without changing user resizing preferences
+            try:
+                # For Windows, use state('zoomed') as maximize
+                if sys.platform.startswith("win"):
+                    self.state("zoomed")
+                else:
+                    # On mac / linux try the fullscreen attribute
+                    self.attributes("-fullscreen", True)
+            except Exception:
+                # last-resort: set geometry to screen size
+                try:
+                    w = self.winfo_screenwidth()
+                    h = self.winfo_screenheight()
+                    self.geometry(f"{w}x{h}")
+                except Exception:
+                    pass
+
+            # Add an escape handler so user can exit fullscreen
+            def _exit_fs(e=None):
+                try:
+                    if sys.platform.startswith("win"):
+                        self.state("normal")
+                    else:
+                        self.attributes("-fullscreen", False)
+                except Exception:
+                    try:
+                        self.geometry("1280x780")
+                    except Exception:
+                        pass
+
+            # bind Escape to exit fullscreen
+            try:
+                self.bind("<Escape>", _exit_fs)
+            except Exception:
+                pass
+
+        except Exception as e:
+            # do not crash — log only
+            logger.exception("Failed to enter fullscreen", exc_info=e)
 
 # ------------------ Modify Base VID (unchanged core) ------------------
 def modify_base_vid(new_base: int):
