@@ -5,7 +5,9 @@ from tkinter import ttk, messagebox, filedialog
 from tkinter import simpledialog
 import customtkinter as ctk
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas as rl_canvas
+from reportlab.pdfgen import canvas as rl_canvas 
+
+
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 import io
@@ -767,26 +769,28 @@ def init_db(db_path=DB_FILE):
                 pass
         raise
 
-def bind_commission_to_voucher(conn, commission_id, voucher_id):
+def bind_commission_to_voucher(commission_id, voucher_id):
     """
     Bind a commission row to a voucher by setting commissions.voucher_id = ? for the given commission_id.
-    - conn: sqlite3.Connection
-    - commission_id: the primary key or unique id of the commission record (as stored)
+    - commission_id: the primary key id of the commission record
     - voucher_id: the voucher identifier to bind
 
-    This function no longer modifies schema; it assumes the 'voucher_id' column already exists.
-    If column is missing, it will log and return False with an explanatory message.
     Returns True on success, False on failure.
+    This variant opens its own DB connection (so callers just pass two args).
     """
     try:
+        conn = get_conn()
         cur = conn.cursor()
 
         # Check schema: make sure voucher_id column exists
         cur.execute("PRAGMA table_info('commissions')")
         cols = [r[1] for r in cur.fetchall()]
         if "voucher_id" not in cols:
-            logger.error("bind_commission_to_voucher: 'voucher_id' column missing from commissions table. "
-                         "Please run init_db() or ensure migrations have been applied.")
+            logger.error(
+                "bind_commission_to_voucher: 'voucher_id' column missing from commissions table. "
+                "Please run init_db() or ensure migrations have been applied."
+            )
+            conn.close()
             return False
 
         # Create a backup before mutating (best-effort call)
@@ -806,10 +810,12 @@ def bind_commission_to_voucher(conn, commission_id, voucher_id):
             if cur.rowcount == 0:
                 # No row updated - maybe commission_id not found
                 logger.warning("bind_commission_to_voucher: no commission row found for id=%s", commission_id)
-                cur.execute("ROLLBACK")
+                conn.rollback()
+                conn.close()
                 return False
             conn.commit()
             logger.info("Bound commission id=%s to voucher_id=%s", commission_id, voucher_id)
+            conn.close()
             return True
         except Exception:
             logger.exception("Failed to update commission voucher_id; rolling back")
@@ -817,10 +823,18 @@ def bind_commission_to_voucher(conn, commission_id, voucher_id):
                 conn.rollback()
             except Exception:
                 pass
+            try:
+                conn.close()
+            except Exception:
+                pass
             return False
 
     except Exception:
         logger.exception("Unexpected error in bind_commission_to_voucher")
+        try:
+            conn.close()
+        except Exception:
+            pass
         return False
 
 def _read_base_vid():
