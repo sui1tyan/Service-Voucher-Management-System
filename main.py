@@ -1,6 +1,7 @@
 import os, sys, io, json, zipfile, shutil, sqlite3, webbrowser, re
 import tkinter as tk
 import customtkinter as ctk
+import time
 import io
 import bcrypt
 import logging
@@ -38,6 +39,31 @@ def get_conn():
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
+
+def retry_db_operation(callable_fn, retries: int = 5, base_delay: float = 0.08):
+    """
+    Run a callable that performs DB I/O and retry on transient SQLITE 'database is locked' errors.
+    callable_fn: a zero-arg callable that performs the DB action (e.g., lambda: cur.execute(...))
+    Returns whatever callable_fn returns.
+    Raises the last exception if retries exhausted.
+    """
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            return callable_fn()
+        except sqlite3.OperationalError as e:
+            last_exc = e
+            msg = str(e).lower()
+            if "database is locked" in msg or "database is busy" in msg:
+                # small backoff, increase delay slightly on each attempt
+                if attempt < retries - 1:
+                    time.sleep(base_delay * (1 + attempt * 0.7))
+                    continue
+            # Other OperationalError: re-raise
+            raise
+    # exhausted
+    if last_exc:
+        raise last_exc
 
 def restart_app():
     """Restart the current app (PyInstaller EXE or python script) with same args."""
@@ -770,69 +796,82 @@ def init_db(db_path=DB_FILE):
 def bind_commission_to_voucher(commission_id, voucher_id):
     """
     Bind a commission row to a voucher by setting commissions.voucher_id = ? for the given commission_id.
-    - commission_id: the primary key id of the commission record
-    - voucher_id: the voucher identifier to bind
 
     Returns True on success, False on failure.
     This variant opens its own DB connection (so callers just pass two args).
     """
     try:
-        conn = get_conn()
-        cur = conn.cursor()
+        # Use context manager so connection is always closed and transactions roll back on exception
+        with get_conn() as conn:
+            cur = conn.cursor()
 
-        # Check schema: make sure voucher_id column exists
-        cur.execute("PRAGMA table_info('commissions')")
-        cols = [r[1] for r in cur.fetchall()]
-        if "voucher_id" not in cols:
-            logger.error(
-                "bind_commission_to_voucher: 'voucher_id' column missing from commissions table. "
-                "Please run init_db() or ensure migrations have been applied."
-            )
-            conn.close()
-            return False
-
-        # Create a backup before mutating (best-effort call)
-        try:
-            if "_ensure_db_backup" in globals():
-                try:
-                    _ensure_db_backup(cur)
-                except Exception:
-                    logger.exception("Backup helper failed inside bind_commission_to_voucher")
-        except Exception:
-            logger.exception("Unexpected error invoking backup helper inside bind_commission_to_voucher")
-
-        # Perform the binding in a transaction
-        try:
-            cur.execute("BEGIN")
-            cur.execute("UPDATE commissions SET voucher_id = ? WHERE id = ?", (voucher_id, commission_id))
-            if cur.rowcount == 0:
-                # No row updated - maybe commission_id not found
-                logger.warning("bind_commission_to_voucher: no commission row found for id=%s", commission_id)
-                conn.rollback()
-                conn.close()
+            # Check schema: make sure voucher_id column exists
+            cur.execute("PRAGMA table_info('commissions')")
+            cols = [r[1] for r in cur.fetchall()]
+            if "voucher_id" not in cols:
+                logger.error(
+                    "bind_commission_to_voucher: 'voucher_id' column missing from commissions table. "
+                    "Please run init_db() or ensure migrations have been applied."
+                )
                 return False
-            conn.commit()
+
+            # Best-effort backup helper (if present)
+            try:
+                if "_ensure_db_backup" in globals():
+                    try:
+                        _ensure_db_backup(cur)
+                    except Exception:
+                        logger.exception("Backup helper failed inside bind_commission_to_voucher")
+            except Exception:
+                logger.exception("Unexpected error invoking backup helper inside bind_commission_to_voucher")
+
+            # Defensive checks: commission exists?
+            cur.execute("SELECT id, voucher_id FROM commissions WHERE id = ?", (commission_id,))
+            row = cur.fetchone()
+            if not row:
+                logger.warning("bind_commission_to_voucher: no commission row found for id=%s", commission_id)
+                return False
+
+            existing_bound_vid = row[1]
+            # If already bound to same voucher, treat as success (idempotent)
+            if existing_bound_vid and str(existing_bound_vid) == str(voucher_id):
+                logger.info("bind_commission_to_voucher: commission %s already bound to voucher %s (idempotent)", commission_id, voucher_id)
+                return True
+
+            # If voucher_id already bound to another commission, fail (avoid duplicates)
+            cur.execute("SELECT id FROM commissions WHERE voucher_id = ? AND id <> ?", (voucher_id, commission_id))
+            other = cur.fetchone()
+            if other:
+                logger.warning("bind_commission_to_voucher: voucher %s already bound to commission id=%s", voucher_id, other[0])
+                return False
+
+            # Perform the binding. Use retry_db_operation if available to handle transient locks.
+            def _do_update():
+                cur.execute("UPDATE commissions SET voucher_id = ?, updated_at = ? WHERE id = ?",
+                            (voucher_id, datetime.now().isoformat(sep=' ', timespec='seconds'), commission_id))
+                return cur.rowcount
+
+            try:
+                if "retry_db_operation" in globals():
+                    rows = retry_db_operation(_do_update)
+                else:
+                    rows = _do_update()
+            except Exception:
+                logger.exception("Failed to update commission voucher_id; operation aborted")
+                # Let context manager rollback and close
+                return False
+
+            if not rows:
+                logger.warning("bind_commission_to_voucher: update affected 0 rows for commission id=%s", commission_id)
+                return False
+
             logger.info("Bound commission id=%s to voucher_id=%s", commission_id, voucher_id)
-            conn.close()
+            # commit happens automatically when leaving the 'with' block without exception
             return True
-        except Exception:
-            logger.exception("Failed to update commission voucher_id; rolling back")
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            try:
-                conn.close()
-            except Exception:
-                pass
-            return False
 
     except Exception:
+        # No assumption that conn exists here — safe to just log and return False
         logger.exception("Unexpected error in bind_commission_to_voucher")
-        try:
-            conn.close()
-        except Exception:
-            pass
         return False
 
 def _read_base_vid():
@@ -1036,25 +1075,53 @@ def _draw_policies_and_signatures(c, left, right, bottom_table, left_col_w, reci
 
 def generate_pdf(voucher_id, customer_name, contact_number, units,
                  particulars, problem, staff_name, status, created_at, recipient):
-    filename = os.path.join(PDF_DIR, f"voucher_{voucher_id}.pdf")
-    c = rl_canvas.Canvas(filename, pagesize=A4)
-    width, height = A4
-    left, right, top_y = 12 * mm, width - 12 * mm, height - 15 * mm
-    title_baseline = _draw_header(c, left, right, top_y, voucher_id)
-    _draw_datetime_row(c, left, right, title_baseline, created_at)
-    top_table = title_baseline - 12 * mm
-    bottom_table, left_col_w = _draw_main_table(c, left, right, top_table, customer_name, particulars, units,
-                                                contact_number, problem)
+    """
+    Safe PDF generator:
+    - Writes to a temp file (same directory) and atomically replaces the final file.
+    - Returns the final (absolute) filename on success.
+    """
+    os.makedirs(PDF_DIR, exist_ok=True)
+    final_pdf = os.path.join(PDF_DIR, f"voucher_{voucher_id}.pdf")
+    tmp_pdf = final_pdf + ".part"
     try:
-        dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S");
-        date_str = dt.strftime("%d-%m-%Y")
+        # Write into the temporary file first
+        c = rl_canvas.Canvas(tmp_pdf, pagesize=A4)
+        width, height = A4
+        left, right, top_y = 12 * mm, width - 12 * mm, height - 15 * mm
+        title_baseline = _draw_header(c, left, right, top_y, voucher_id)
+        _draw_datetime_row(c, left, right, title_baseline, created_at)
+        top_table = title_baseline - 12 * mm
+        bottom_table, left_col_w = _draw_main_table(c, left, right, top_table, customer_name, particulars, units,
+                                                    contact_number, problem)
+        try:
+            dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+            date_str = dt.strftime("%d-%m-%Y")
+        except Exception:
+            date_str = created_at[:10]
+        _draw_policies_and_signatures(c, left, right, bottom_table, left_col_w, recipient, voucher_id, customer_name,
+                                      contact_number, date_str)
+        c.showPage()
+        c.save()
+        # Atomically move into final place
+        try:
+            os.replace(tmp_pdf, final_pdf)
+        except Exception:
+            # If os.replace is not available on platform, fall back to rename
+            try:
+                os.rename(tmp_pdf, final_pdf)
+            except Exception:
+                # If final replace fails, keep the temp (so no data loss) and raise
+                logger.exception("Failed to move temporary PDF into place")
+                raise
+        return final_pdf
     except Exception:
-        date_str = created_at[:10]
-    _draw_policies_and_signatures(c, left, right, bottom_table, left_col_w, recipient, voucher_id, customer_name,
-                                  contact_number, date_str)
-    c.showPage();
-    c.save()
-    return filename
+        # Clean up temp file if it exists (best-effort)
+        try:
+            if os.path.exists(tmp_pdf):
+                os.remove(tmp_pdf)
+        except Exception:
+            pass
+        raise
 
 # ------------------ DB ops (vouchers) ------------------
 def add_voucher(
@@ -1721,25 +1788,33 @@ def _validate_status_or_raise(s: str):
         raise ValueError(f"Invalid status: {s}")
 
 class VoucherApp(ctk.CTk):
-    def _copy_selected_row(self, max_chars=5000):
+    def _copy_selected_row(self, max_chars: int = 5000):
         """
-        Copy the currently selected tree row to the clipboard safely.
-        - If the row's text exceeds max_chars, copy a truncated preview to clipboard
-          and write the full text to a timestamped temp file, then notify the user.
-        - Uses tkinter clipboard methods (clipboard_clear / clipboard_append).
-        - Logs exceptions for debugging.
+        Copy currently selected row to clipboard. Defensive guards:
+          - Ensure max_chars is an int (if UI accidentally passed a widget, we coerce/ignore).
+          - Ensure self.tree exists and is a Treeview.
+          - Handles very large rows by saving full content to a timestamped file and copying a truncated preview.
         """
         try:
-            sel = None
+            # Defensive: if caller mistakenly passed a Treeview as the first arg (legacy bug),
+            # detect and ignore it by coercing to default max_chars.
+            if not isinstance(max_chars, int):
+                max_chars = 5000
+
+            # Defensive: ensure tree exists and has selection method
+            if not hasattr(self, "tree") or not hasattr(self.tree, "selection"):
+                logger.warning("_copy_selected_row called but self.tree not available")
+                try:
+                    messagebox.showinfo("Copy", "No row selected.")
+                except Exception:
+                    pass
+                return
+
+            # Get selection
             try:
                 sel = self.tree.selection()
             except Exception:
-                # some older code may use different tree attribute; try alternative names
-                try:
-                    sel = getattr(self, "voucher_tree").selection()
-                except Exception:
-                    sel = None
-
+                sel = ()
             if not sel:
                 try:
                     messagebox.showinfo("Copy", "No row selected.")
@@ -1749,9 +1824,15 @@ class VoucherApp(ctk.CTk):
 
             # Use the first selected item
             iid = sel[0]
-            values = self.tree.item(iid).get("values", [])
+            try:
+                item = self.tree.item(iid)
+                values = item.get("values", []) if isinstance(item, dict) else []
+            except Exception:
+                values = []
+
             # Clean values into a readable string (column headers not needed)
-            row_text = "\t".join([str(v) for v in values])
+            # ensure all values coerced to plain strings
+            row_text = "\t".join([str(v) for v in (values or [])])
 
             # If small enough, copy directly
             if len(row_text) <= max_chars:
@@ -1763,11 +1844,13 @@ class VoucherApp(ctk.CTk):
                         self.update()
                     except Exception:
                         pass
-                    messagebox.showinfo("Copy", "Row copied to clipboard.")
+                    try:
+                        messagebox.showinfo("Copy", "Row copied to clipboard.")
+                    except Exception:
+                        logger.info("Row copied to clipboard.")
                     return
-                except Exception as e:
-                    logger.exception("Failed to copy to clipboard", exc_info=e)
-                    # fallback to saving to file below
+                except Exception:
+                    logger.exception("Failed to copy to clipboard; will try file fallback")
 
             # Large content path: truncate for clipboard, save full to temp file
             preview = row_text[: max(0, max_chars - 200)]  # leave room for notice
@@ -1777,11 +1860,12 @@ class VoucherApp(ctk.CTk):
             # Save full content to a temp file with timestamp
             try:
                 ts = datetime.now().strftime("%Y%m%d%H%M%S")
-                safe_dir = os.path.join(os.path.dirname(DB_FILE) if 'DB_FILE' in globals() else os.getcwd(), "exports")
+                safe_dir = os.path.join(os.path.dirname(DB_FILE) if "DB_FILE" in globals() else os.getcwd(), "exports")
                 os.makedirs(safe_dir, exist_ok=True)
                 filename = os.path.join(safe_dir, f"voucher_row_full_{ts}.txt")
                 with open(filename, "w", encoding="utf-8") as fh:
                     fh.write(row_text)
+
                 # Write truncated preview to clipboard
                 try:
                     self.clipboard_clear()
@@ -1792,6 +1876,7 @@ class VoucherApp(ctk.CTk):
                         pass
                 except Exception:
                     logger.exception("Failed to place truncated text on clipboard")
+
                 # Inform the user where full content is saved
                 try:
                     messagebox.showinfo(
@@ -1801,17 +1886,18 @@ class VoucherApp(ctk.CTk):
                     )
                 except Exception:
                     logger.info("Large row saved to %s", filename)
-            except Exception as e:
-                logger.exception("Failed to save large clipboard content to file", exc_info=e)
+
+            except Exception:
+                logger.exception("Failed to save large clipboard content to file", exc_info=True)
                 try:
                     messagebox.showerror("Copy failed", "Failed to copy or save row content. See logs for details.")
                 except Exception:
                     pass
 
-        except Exception as e:
+        except Exception:
             # Top-level catch so user doesn't see a crash; log stack trace
-            logger.exception("Unexpected error in _copy_selected_row", exc_info=e)
-            try:
+            logger.exception("Unexpected error in _copy_selected_row", exc_info=True)
+            try:    
                 messagebox.showerror("Copy", "Unexpected error when copying row. Check logs.")
             except Exception:
                 pass
@@ -2025,30 +2111,77 @@ class VoucherApp(ctk.CTk):
             b_base.configure(state=tk.DISABLED)
 
     def _make_context_menu(self, tree):
-        self.ctx = tk.Menu(tree, tearoff=0)
-        self.ctx.add_command(label="Edit", command=self.edit_selected)
-        mark = tk.Menu(self.ctx, tearoff=0)
-        for s in ["Pending", "Completed", "Deleted", "1st call", "2nd reminder", "3rd reminder"]:
-            mark.add_command(label=s, command=lambda st=s: self._bulk_mark(st))
-        self.ctx.add_cascade(label="Mark", menu=mark)
-        self.ctx.add_separator()
-        self.ctx.add_command(label="Open PDF", command=self.open_pdf)
-        self.ctx.add_command(label="Regenerate PDF", command=self.regen_pdf_selected)
-        self.ctx.add_separator()
-        self.ctx.add_command(
-            label="Unmark Completed → Pending", command=lambda: self._bulk_mark("Pending")
-        )
+        """
+        Safe context menu builder for a treeview.
+        - Ensures self.ctx is always set before return.
+        - Registers 'Copy row' correctly (no accidental argument passing).
+        - Cross-platform: binds Button-3, Button-2 and Control-Button-1 (mac).
+        """
+        try:
+            self.ctx = tk.Menu(tree, tearoff=0)
+            # Basic actions
+            self.ctx.add_command(label="Copy row (tab-separated)", command=self._copy_selected_row)
+            self.ctx.add_command(label="Edit", command=self.edit_selected)
+            # Mark submenu
+            mark = tk.Menu(self.ctx, tearoff=0)
+            for s in ["Pending", "Completed", "Deleted", "1st call", "2nd reminder", "3rd reminder"]:
+                # use default arg capture to avoid late-binding trap
+                mark.add_command(label=s, command=(lambda st=s: self._bulk_mark(st)))
+            self.ctx.add_cascade(label="Mark", menu=mark)
+            self.ctx.add_separator()
+            self.ctx.add_command(label="Open PDF", command=self.open_pdf)
+            self.ctx.add_command(label="Regenerate PDF", command=self.regen_pdf_selected)
+            self.ctx.add_separator()
+            self.ctx.add_command(label="Unmark Completed → Pending", command=(lambda: self._bulk_mark("Pending")))
+        except Exception:
+            # Make sure self.ctx exists even if menu building fails
+            try:
+                self.ctx = tk.Menu(tree, tearoff=0)
+            except Exception:
+                self.ctx = None
+            logger.exception("Failed building context menu", exc_info=True)
 
         def _popup(event):
             try:
-                row = tree.identify_row(event.y)
-                if row and row not in tree.selection():
-                    tree.selection_set(row)
-                self.ctx.post(event.x_root, event.y_root)
+                # Identify row and select if not already selected
+                try:
+                    row = tree.identify_row(event.y)
+                    if row and row not in tree.selection():
+                        tree.selection_set(row)
+                except Exception:
+                    pass
+                # Show menu if available
+                if getattr(self, "ctx", None):
+                    try:
+                        self.ctx.post(event.x_root, event.y_root)
+                    except Exception:
+                        try:
+                            # sometimes post can fail if widget destroyed; ignore
+                            pass
+                        except Exception:
+                            pass
             finally:
-                self.ctx.grab_release()
+                try:
+                    if getattr(self, "ctx", None):
+                        self.ctx.grab_release()
+                except Exception:
+                    pass
 
-        tree.bind("<Button-3>", _popup)
+        # Bind right-clicks in a cross-platform way:
+        try:
+            tree.bind("<Button-3>", _popup, add="+")
+        except Exception:
+            pass
+        # Some X11 setups use Button-2 for popup
+        try:
+            tree.bind("<Button-2>", _popup, add="+")
+        except Exception:
+            pass
+        # On macOS, Control-Button-1 is often used
+        try:
+            tree.bind("<Control-Button-1>", _popup, add="+")
+        except Exception:
+            pass
 
     def _get_filters(self):
         """
@@ -2421,7 +2554,7 @@ class VoucherApp(ctk.CTk):
             pick = ctk.CTkToplevel(top)
             pick.title("Choose Commission")
             # Bigger, fixed-size dialog so all columns are visible.
-            pick.geometry("1000x520")
+            pick.geometry("1400x520")
             pick.resizable(False, False)
             pick.grab_set()
             
@@ -2939,7 +3072,7 @@ class VoucherApp(ctk.CTk):
             pick = ctk.CTkToplevel(top)
             pick.title("Choose Commission")
             # Bigger, fixed-size dialog so all columns are visible.
-            pick.geometry("1000x520")
+            pick.geometry("1400x520")
             pick.resizable(False, False)
             pick.grab_set()
 
