@@ -2421,7 +2421,7 @@ class VoucherApp(ctk.CTk):
             pick = ctk.CTkToplevel(top)
             pick.title("Choose Commission")
             # Bigger, fixed-size dialog so all columns are visible.
-            pick.geometry("1000x520")
+            pick.geometry("1200x520")
             pick.resizable(False, False)
             pick.grab_set()
             
@@ -2939,7 +2939,7 @@ class VoucherApp(ctk.CTk):
             pick = ctk.CTkToplevel(top)
             pick.title("Choose Commission")
             # Bigger, fixed-size dialog so all columns are visible.
-            pick.geometry("1000x520")
+            pick.geometry("1200x520")
             pick.resizable(False, False)
             pick.grab_set()
 
