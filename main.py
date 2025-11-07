@@ -4155,10 +4155,11 @@ class VoucherApp(ctk.CTk):
 
     # ---------- Commission UI (with preview + per-staff storage) ----------
     def add_commission(self):
-        """Open dialog to add a commission. Saves commission_amount into DB and allows selecting bill type and staff."""
+        """Open dialog to add a commission. Saves commission_amount into DB.
+        NOTE: staff selection removed (commission created without staff_id)."""
         top = ctk.CTkToplevel(self)
         top.title("Add Commission")
-        top.geometry("520x320")
+        top.geometry("520x260")
         top.resizable(False, False)
         top.grab_set()
 
@@ -4166,12 +4167,27 @@ class VoucherApp(ctk.CTk):
         frm.pack(fill="both", expand=True, padx=12, pady=12)
 
         # Standard width for all boxes (shorter)
-        BOX_W = 260
+        BOX_W = 300
 
         # --- Bill Type (option) ---
         ctk.CTkLabel(frm, text="Bill Type:").grid(row=0, column=0, sticky="w", pady=(0, 6))
         bill_type_var = tk.StringVar(value="CS")
-        bill_type_menu = ctk.CTkOptionMenu(frm, values=["CS", "INV"], variable=bill_type_var, width=BOX_W)
+        # Best-effort black & white appearance for CTkOptionMenu:
+        # CTkOptionMenu supports some color args in many CTk versions: fg_color, button_color, text_color.
+        # If your CTk version doesn't accept them, the widget will ignore unknown kwargs.
+        try:
+            bill_type_menu = ctk.CTkOptionMenu(
+                frm,
+                values=["CS", "INV"],
+                variable=bill_type_var,
+                width=BOX_W,
+                fg_color="black",
+                button_color="black",
+                text_color="white",
+            )
+        except Exception:
+            # fallback if styling args unsupported
+            bill_type_menu = ctk.CTkOptionMenu(frm, values=["CS", "INV"], variable=bill_type_var, width=BOX_W)
         bill_type_menu.grid(row=0, column=1, sticky="w", pady=(0, 6))
 
         # --- Bill No ---
@@ -4189,67 +4205,15 @@ class VoucherApp(ctk.CTk):
         e_comm = ctk.CTkEntry(frm, width=BOX_W)
         e_comm.grid(row=3, column=1, sticky="w", pady=(0, 6))
 
-        # --- Staff ID (display only) ---
-        ctk.CTkLabel(frm, text="Staff ID (opt):").grid(row=4, column=0, sticky="w", pady=(6, 6))
-        staff_id_var = tk.StringVar(value="")
-        e_staff_id = ctk.CTkEntry(frm, width=BOX_W, textvariable=staff_id_var)
-        e_staff_id.configure(state="disabled")
-        e_staff_id.grid(row=4, column=1, sticky="w", pady=(6, 6))
-
-        # --- Staff Name (dropdown) ---
-        ctk.CTkLabel(frm, text="Staff Name (optional):").grid(row=5, column=0, sticky="w", pady=(0, 6))
-        staff_name_var = tk.StringVar(value="")
-        # Build staff list from DB (name display)
-        try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT id, staff_id_opt, name FROM staffs ORDER BY name COLLATE NOCASE ASC")
-            staff_rows = cur.fetchall()
-            conn.close()
-        except Exception:
-            logger.exception("Failed fetching staffs for add_commission")
-            staff_rows = []
-
-        staff_names = [r["name"] for r in staff_rows] if staff_rows else []
-        # Option menu for staff names (empty first item to allow 'none')
-        staff_menu_values = [""] + staff_names
-        staff_menu = ctk.CTkOptionMenu(frm, values=staff_menu_values, variable=staff_name_var, width=BOX_W)
-        staff_menu.grid(row=5, column=1, sticky="w", pady=(0, 6))
-
-        # Helper: update staff_id_var when staff_name_var changes
-        def _on_staff_change(*_a):
-            sel_name = (staff_name_var.get() or "").strip()
-            if not sel_name:
-                staff_id_var.set("")
-                return
-            # Lookup staff_id_opt for selected name
-            try:
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute("SELECT staff_id_opt FROM staffs WHERE name = ?", (sel_name,))
-                rr = cur.fetchone()
-                conn.close()
-                if rr and rr["staff_id_opt"]:
-                    staff_id_var.set(rr["staff_id_opt"])
-                else:
-                    staff_id_var.set("")
-            except Exception:
-                logger.exception("Failed resolving staff_id_opt for selected staff")
-                staff_id_var.set("")
-
-        # Bind change
-        staff_name_var.trace_add("write", _on_staff_change)
-
         # Buttons row
         btn_frame = ctk.CTkFrame(frm)
-        btn_frame.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btn_frame.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
 
         def _do_save():
             bill_type = (bill_type_var.get() or "").strip().upper()
             bill_no = (e_bill.get() or "").strip().upper()
             total = (e_total.get() or "").strip()
             comm_amt = (e_comm.get() or "").strip()
-            sel_staff_name = (staff_name_var.get() or "").strip()
 
             # Validate bill_type
             if bill_type not in ("CS", "INV"):
@@ -4277,22 +4241,7 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Validation", "Commission amount must be a number.", parent=top)
                 return
 
-            # Resolve staff DB id if a staff name selected
-            staff_db_id = None
-            if sel_staff_name:
-                try:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("SELECT id FROM staffs WHERE name = ?", (sel_staff_name,))
-                    row = cur.fetchone()
-                    conn.close()
-                    if row:
-                        staff_db_id = row["id"]
-                except Exception:
-                    logger.exception("Failed resolving staff DB id for selected staff")
-                    staff_db_id = None
-
-            # Insert into commissions table
+            # Insert into commissions table WITHOUT staff_id (NULL). staff will be determined when binding to voucher.
             try:
                 conn = get_conn()
                 cur = conn.cursor()
@@ -4301,7 +4250,7 @@ class VoucherApp(ctk.CTk):
                     INSERT INTO commissions
                       (staff_id, bill_type, bill_no, total_amount, commission_amount, bill_image_path, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (staff_db_id, bill_type, bill_no, total_val, comm_val, "", ts, ts))
+                """, (None, bill_type, bill_no or "", total_val, comm_val, "", ts, ts))
                 conn.commit()
                 conn.close()
             except Exception:
@@ -4321,6 +4270,14 @@ class VoucherApp(ctk.CTk):
             try:
                 top.destroy()
             except Exception:
+                pass
+
+            # optional: refresh commissions view if open
+            try:
+                if hasattr(self, "perform_search") and callable(self.perform_search):
+                    self.perform_search()
+            except Exception:
+                # best-effort
                 pass
 
         white_btn(btn_frame, text="Save", width=120, command=_do_save).pack(side="right", padx=(8, 0))
@@ -4460,6 +4417,29 @@ class VoucherApp(ctk.CTk):
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         vsb.pack(side="right", fill="y")
         tree.configure(yscrollcommand=vsb.set)
+        
+        # --- Context menu for commissions (right-click) ---
+        try:
+            comm_ctx = tk.Menu(tree, tearoff=0)
+            comm_ctx.add_command(label="Edit", command=edit_comm)
+            comm_ctx.add_command(label="Bind to Voucher", command=bind_selected)
+            comm_ctx.add_command(label="Delete", command=_delete_selected)
+
+            def _comm_popup(event):
+                try:
+                    row = tree.identify_row(event.y)
+                    if row and row not in tree.selection():
+                        tree.selection_set(row)
+                    comm_ctx.post(event.x_root, event.y_root)
+                finally:
+                    try:
+                        comm_ctx.grab_release()
+                    except Exception:
+                        pass
+
+            tree.bind("<Button-3>", _comm_popup)
+        except Exception:
+            logger.exception("Caught exception setting up commission context menu", exc_info=True)
 
         # --- Loader ---
         def _load_rows(q=""):
@@ -4538,16 +4518,14 @@ class VoucherApp(ctk.CTk):
                 messagebox.showerror("Edit", "Invalid selection.", parent=top)
                 return
 
-            # Load commission with existing staff info
+            # Load commission (do NOT join staffs since we won't show/edit staff here)
             try:
                 conn = get_conn()
                 cur = conn.cursor()
                 cur.execute("""
-                    SELECT c.id, c.staff_id, s.staff_id_opt, s.name as staff_name,
-                           c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.created_at
-                    FROM commissions c
-                    LEFT JOIN staffs s ON c.staff_id = s.id
-                    WHERE c.id = ?
+                    SELECT id, bill_type, bill_no, total_amount, commission_amount, created_at
+                    FROM commissions
+                    WHERE id = ?
                 """, (cid,))
                 row = cur.fetchone()
                 conn.close()
@@ -4561,11 +4539,8 @@ class VoucherApp(ctk.CTk):
                 return
 
             # Existing values
-            existing_staff_id = row["staff_id"]
-            existing_staff_id_opt = row.get("staff_id_opt") or ""
-            existing_staff_name = row.get("staff_name") or ""
-            existing_bill_type = (row.get("bill_type") or "CS").upper()
-            existing_bill_no = row.get("bill_no") or ""
+            existing_bill_type = (row["bill_type"] or "CS").upper()
+            existing_bill_no = row["bill_no"] or ""
             existing_total = "" if row["total_amount"] is None else str(row["total_amount"])
             existing_comm_amt = "" if row["commission_amount"] is None else str(row["commission_amount"])
             existing_created = row.get("created_at") or ""
@@ -4573,14 +4548,14 @@ class VoucherApp(ctk.CTk):
             # Dialog
             etop = ctk.CTkToplevel(self)
             etop.title(f"Edit Commission {cid}")
-            etop.geometry("520x340")
+            etop.geometry("520x300")
             etop.resizable(False, False)
             etop.grab_set()
 
             efrm = ctk.CTkFrame(etop)
             efrm.pack(fill="both", expand=True, padx=12, pady=12)
 
-            BOX_W = 260
+            BOX_W = 300
 
             # Bill Type (CS/INV)
             ctk.CTkLabel(efrm, text="Bill Type:").grid(row=0, column=0, sticky="w")
@@ -4606,67 +4581,10 @@ class VoucherApp(ctk.CTk):
             e_comm.insert(0, existing_comm_amt)
             e_comm.grid(row=3, column=1, sticky="w", padx=8, pady=6)
 
-            # Staff ID (display)
-            ctk.CTkLabel(efrm, text="Staff ID (opt):").grid(row=4, column=0, sticky="w")
-            staff_id_var = tk.StringVar(value=existing_staff_id_opt)
-            e_staff_id = ctk.CTkEntry(efrm, width=BOX_W, textvariable=staff_id_var)
-            e_staff_id.configure(state="disabled")
-            e_staff_id.grid(row=4, column=1, sticky="w", padx=8, pady=6)
-
-            # Staff Name (dropdown) - include empty option
-            ctk.CTkLabel(efrm, text="Staff Name (optional):").grid(row=5, column=0, sticky="w")
-            staff_name_var = tk.StringVar(value=existing_staff_name)
-
-            try:
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute("SELECT id, staff_id_opt, name FROM staffs ORDER BY name COLLATE NOCASE ASC")
-                staff_rows = cur.fetchall()
-                conn.close()
-            except Exception:
-                logger.exception("Failed fetching staffs for edit_comm")
-                staff_rows = []
-
-            staff_names = [r["name"] for r in staff_rows] if staff_rows else []
-            staff_menu_values = [""] + staff_names
-            staff_menu = ctk.CTkOptionMenu(efrm, values=staff_menu_values, variable=staff_name_var, width=BOX_W)
-            staff_menu.grid(row=5, column=1, sticky="w", padx=8, pady=6)
-
-            # If existing staff id set, ensure name and id shown
-            if existing_staff_id:
-                try:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("SELECT name, staff_id_opt FROM staffs WHERE id = ?", (existing_staff_id,))
-                    srow = cur.fetchone()
-                    conn.close()
-                    if srow:
-                        staff_name_var.set(srow["name"])
-                        staff_id_var.set(srow.get("staff_id_opt") or "")
-                except Exception:
-                    logger.exception("Failed resolving existing staff for edit_comm")
-
-            # staff_name -> staff_id_opt sync
-            def _on_staff_change(*_a):
-                sel_name = (staff_name_var.get() or "").strip()
-                if not sel_name:
-                    staff_id_var.set("")
-                    return
-                try:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("SELECT staff_id_opt FROM staffs WHERE name = ?", (sel_name,))
-                    rr = cur.fetchone()
-                    conn.close()
-                    if rr and rr.get("staff_id_opt"):
-                        staff_id_var.set(rr["staff_id_opt"])
-                    else:
-                        staff_id_var.set("")
-                except Exception:
-                    logger.exception("Failed resolving staff_id_opt for selected staff")
-                    staff_id_var.set("")
-
-            staff_name_var.trace_add("write", _on_staff_change)
+            # Created (readonly)
+            ctk.CTkLabel(efrm, text="Created:").grid(row=4, column=0, sticky="w")
+            lbl_created = ctk.CTkLabel(efrm, text=existing_created or "")
+            lbl_created.grid(row=4, column=1, sticky="w", padx=8, pady=6)
 
             # Buttons
             btns = ctk.CTkFrame(etop)
@@ -4690,7 +4608,7 @@ class VoucherApp(ctk.CTk):
                     messagebox.showerror("Invalid", "Amounts must be numeric.", parent=etop)
                     return
 
-                # Require bill_no (keeps behavior of original)
+                # Require bill_no (keeps previous behavior)
                 if not new_bill_no:
                     messagebox.showerror("Missing", "Bill number is required.", parent=etop)
                     return
@@ -4717,32 +4635,16 @@ class VoucherApp(ctk.CTk):
                     logger.exception("Failed doing duplicate check for commissions")
                     # proceed cautiously (let DB constraint handle it later)
 
-                # Resolve staff id if selected
-                staff_db_id = None
-                sel_staff_name = (staff_name_var.get() or "").strip()
-                if sel_staff_name:
-                    try:
-                        conn = get_conn()
-                        cur = conn.cursor()
-                        cur.execute("SELECT id FROM staffs WHERE name = ?", (sel_staff_name,))
-                        s_row = cur.fetchone()
-                        conn.close()
-                        if s_row:
-                            staff_db_id = s_row["id"]
-                    except Exception:
-                        logger.exception("Failed resolving staff DB id for selected staff")
-                        staff_db_id = None
-
-                # Update DB
+                # Update DB: DO NOT change staff_id here (leave existing staff binding intact).
                 try:
                     conn2 = get_conn()
                     cur2 = conn2.cursor()
                     ts = datetime.now().isoformat(sep=" ", timespec="seconds")
                     cur2.execute("""
                         UPDATE commissions
-                        SET staff_id = ?, bill_type = ?, bill_no = ?, total_amount = ?, commission_amount = ?, updated_at = ?
+                        SET bill_type = ?, bill_no = ?, total_amount = ?, commission_amount = ?, updated_at = ?
                         WHERE id = ?
-                    """, (staff_db_id, new_type, new_bill_no, new_total, new_comm, ts, cid))
+                    """, (new_type, new_bill_no, new_total, new_comm, ts, cid))
                     if cur2.rowcount == 0:
                         conn2.rollback()
                         conn2.close()
