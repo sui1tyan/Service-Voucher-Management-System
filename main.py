@@ -2540,20 +2540,31 @@ class VoucherApp(ctk.CTk):
                 conn = get_conn()
                 cur = conn.cursor()
                 cur.execute("""
-                    SELECT c.id, s.staff_id_opt, s.name, c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.created_at
+                    SELECT c.id,
+                           COALESCE(s.staff_id_opt, '') AS staff_opt,
+                           COALESCE(s.name, '') AS staff_name,
+                           COALESCE(c.bill_type, '') AS bill_type,
+                           COALESCE(c.bill_no, '') AS bill_no,
+                           COALESCE(c.total_amount, '') AS total_amount,
+                           COALESCE(c.commission_amount, '') AS commission_amount,
+                           COALESCE(c.created_at, '') AS created_at
                     FROM commissions c
-                    JOIN staffs s ON c.staff_id = s.id
+                    LEFT JOIN staffs s ON c.staff_id = s.id
                     WHERE (c.voucher_id IS NULL OR c.voucher_id = '')
                     ORDER BY c.id DESC
                 """)
                 rows = cur.fetchall()
                 conn.close()
+
                 tree.delete(*tree.get_children())
                 for (cid, staff_opt, staff_name, bt, bno, tot, comm, created_at) in rows:
-                    if qlow and qlow not in str(staff_name).lower() and qlow not in str(bno).lower():
-                        continue
-                    tree.insert("", "end", iid=str(cid), values=(cid, staff_opt or "", staff_name, bt, bno, tot or "", comm or "", created_at or ""))
-            _load()
+                    # simple textual filtering by staff name or bill no (if user supplied a query)
+                    if qlow:
+                        hay = " ".join([str(staff_name or ""), str(bno or "")]).lower()
+                        if qlow not in hay:
+                            continue
+                    tree.insert("", "end", iid=str(cid),
+                                values=(cid, staff_opt or "", staff_name or "", bt or "", bno or "", tot or "", comm or "", created_at or ""))
 
             def _pick_selected():
                 sel = tree.selection()
@@ -3055,21 +3066,31 @@ class VoucherApp(ctk.CTk):
                 conn = get_conn()
                 cur = conn.cursor()
                 cur.execute("""
-                    SELECT c.id, s.staff_id_opt, s.name, c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.created_at
+                    SELECT c.id,
+                           COALESCE(s.staff_id_opt, '') AS staff_opt,
+                           COALESCE(s.name, '') AS staff_name,
+                           COALESCE(c.bill_type, '') AS bill_type,
+                           COALESCE(c.bill_no, '') AS bill_no,
+                           COALESCE(c.total_amount, '') AS total_amount,
+                           COALESCE(c.commission_amount, '') AS commission_amount,
+                           COALESCE(c.created_at, '') AS created_at
                     FROM commissions c
-                    JOIN staffs s ON c.staff_id = s.id
+                    LEFT JOIN staffs s ON c.staff_id = s.id
                     WHERE (c.voucher_id IS NULL OR c.voucher_id = '')
                     ORDER BY c.id DESC
                 """)
                 rows = cur.fetchall()
                 conn.close()
+
                 tree.delete(*tree.get_children())
                 for (cid, staff_opt, staff_name, bt, bno, tot, comm, created_at) in rows:
-                    if qlow and qlow not in str(staff_name).lower() and qlow not in str(bno).lower():
-                        continue
-                    tree.insert("", "end", iid=str(cid), values=(cid, staff_opt or "", staff_name, bt, bno, tot or "", comm or "", created_at or ""))
-
-            _load()
+                    # simple textual filtering by staff name or bill no (if user supplied a query)
+                    if qlow:
+                        hay = " ".join([str(staff_name or ""), str(bno or "")]).lower()
+                        if qlow not in hay:
+                            continue
+                    tree.insert("", "end", iid=str(cid),
+                                values=(cid, staff_opt or "", staff_name or "", bt or "", bno or "", tot or "", comm or "", created_at or ""))
 
             def _pick_selected():
                 sel = tree.selection()
@@ -4418,7 +4439,8 @@ class VoucherApp(ctk.CTk):
         vsb.pack(side="right", fill="y")
         tree.configure(yscrollcommand=vsb.set)
         
-        # --- Context menu for commissions (right-click) ---
+
+        # Single context menu (create AFTER edit_comm exists and AFTER tree was created)
         try:
             comm_ctx = tk.Menu(tree, tearoff=0)
             comm_ctx.add_command(label="Edit", command=edit_comm)
@@ -4427,6 +4449,7 @@ class VoucherApp(ctk.CTk):
 
             def _comm_popup(event):
                 try:
+                    # ensure right row is selected
                     row = tree.identify_row(event.y)
                     if row and row not in tree.selection():
                         tree.selection_set(row)
@@ -4437,7 +4460,10 @@ class VoucherApp(ctk.CTk):
                     except Exception:
                         pass
 
-            tree.bind("<Button-3>", _comm_popup)
+            # Bind several events to be safe across platforms
+            tree.bind("<Button-3>", _comm_popup)              # usual right-click on Windows/Linux
+            tree.bind("<Button-2>", _comm_popup)              # some X11 configs / Mac mouse
+            tree.bind("<Control-Button-1>", _comm_popup)      # Ctrl+click fallback (macOS users)
         except Exception:
             logger.exception("Caught exception setting up commission context menu", exc_info=True)
 
