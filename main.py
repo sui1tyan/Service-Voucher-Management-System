@@ -2539,6 +2539,8 @@ class VoucherApp(ctk.CTk):
                 qlow = (q or "").strip().lower()
                 conn = get_conn()
                 cur = conn.cursor()
+                # Use LEFT JOIN so commissions without staff_id show up,
+                # and COALESCE to present empty strings instead of None.
                 cur.execute("""
                     SELECT c.id,
                            COALESCE(s.staff_id_opt, '') AS staff_opt,
@@ -2558,13 +2560,13 @@ class VoucherApp(ctk.CTk):
 
                 tree.delete(*tree.get_children())
                 for (cid, staff_opt, staff_name, bt, bno, tot, comm, created_at) in rows:
-                    # simple textual filtering by staff name or bill no (if user supplied a query)
                     if qlow:
                         hay = " ".join([str(staff_name or ""), str(bno or "")]).lower()
                         if qlow not in hay:
                             continue
                     tree.insert("", "end", iid=str(cid),
-                                values=(cid, staff_opt or "", staff_name or "", bt or "", bno or "", tot or "", comm or "", created_at or ""))
+                                values=(cid, staff_opt or "", staff_name or "", bt or "", bno or "",
+                                        tot if tot is not None else "", comm if comm is not None else "", created_at or ""))
 
             def _pick_selected():
                 sel = tree.selection()
@@ -3061,10 +3063,13 @@ class VoucherApp(ctk.CTk):
                 tree.column(ccol, width=wcol, anchor="w", stretch=False)
             tree.pack(fill="both", expand=True, padx=6, pady=(0,6))
 
+            # populate
             def _load(q=""):
                 qlow = (q or "").strip().lower()
                 conn = get_conn()
                 cur = conn.cursor()
+                # Use LEFT JOIN so commissions without staff_id show up,
+                # and COALESCE to present empty strings instead of None.
                 cur.execute("""
                     SELECT c.id,
                            COALESCE(s.staff_id_opt, '') AS staff_opt,
@@ -3084,13 +3089,13 @@ class VoucherApp(ctk.CTk):
 
                 tree.delete(*tree.get_children())
                 for (cid, staff_opt, staff_name, bt, bno, tot, comm, created_at) in rows:
-                    # simple textual filtering by staff name or bill no (if user supplied a query)
                     if qlow:
                         hay = " ".join([str(staff_name or ""), str(bno or "")]).lower()
                         if qlow not in hay:
                             continue
                     tree.insert("", "end", iid=str(cid),
-                                values=(cid, staff_opt or "", staff_name or "", bt or "", bno or "", tot or "", comm or "", created_at or ""))
+                                values=(cid, staff_opt or "", staff_name or "", bt or "", bno or "",
+                                        tot if tot is not None else "", comm if comm is not None else "", created_at or ""))
 
             def _pick_selected():
                 sel = tree.selection()
@@ -4439,34 +4444,6 @@ class VoucherApp(ctk.CTk):
         vsb.pack(side="right", fill="y")
         tree.configure(yscrollcommand=vsb.set)
         
-
-        # Single context menu (create AFTER edit_comm exists and AFTER tree was created)
-        try:
-            comm_ctx = tk.Menu(tree, tearoff=0)
-            comm_ctx.add_command(label="Edit", command=edit_comm)
-            comm_ctx.add_command(label="Bind to Voucher", command=bind_selected)
-            comm_ctx.add_command(label="Delete", command=_delete_selected)
-
-            def _comm_popup(event):
-                try:
-                    # ensure right row is selected
-                    row = tree.identify_row(event.y)
-                    if row and row not in tree.selection():
-                        tree.selection_set(row)
-                    comm_ctx.post(event.x_root, event.y_root)
-                finally:
-                    try:
-                        comm_ctx.grab_release()
-                    except Exception:
-                        pass
-
-            # Bind several events to be safe across platforms
-            tree.bind("<Button-3>", _comm_popup)              # usual right-click on Windows/Linux
-            tree.bind("<Button-2>", _comm_popup)              # some X11 configs / Mac mouse
-            tree.bind("<Control-Button-1>", _comm_popup)      # Ctrl+click fallback (macOS users)
-        except Exception:
-            logger.exception("Caught exception setting up commission context menu", exc_info=True)
-
         # --- Loader ---
         def _load_rows(q=""):
             qlow = (q or "").strip().lower()
@@ -4722,6 +4699,34 @@ class VoucherApp(ctk.CTk):
 
             white_btn(btns, text="Cancel", width=120, command=etop.destroy).pack(side="right", padx=(6, 0))
             white_btn(btns, text="Save Changes", width=140, command=_save_edit).pack(side="right")
+
+        # --- Context menu for commissions (right-click) ---
+        try:
+            comm_ctx = tk.Menu(tree, tearoff=0)
+            comm_ctx.add_command(label="Edit", command=edit_comm)
+            comm_ctx.add_command(label="Bind to Voucher", command=bind_selected)
+            comm_ctx.add_command(label="Delete", command=_delete_selected)
+
+            def _comm_popup(event):
+                try:
+                    # select the row under the cursor so the menu acts on it
+                    row = tree.identify_row(event.y)
+                    if row and row not in tree.selection():
+                        tree.selection_set(row)
+                    comm_ctx.post(event.x_root, event.y_root)
+                finally:
+                    try:
+                        comm_ctx.grab_release()
+                    except Exception:
+                        pass
+
+            # Bind several variants so the menu shows on common platforms
+            tree.bind("<Button-3>", _comm_popup)          # Windows / Linux right-click
+            tree.bind("<Button-2>", _comm_popup)          # Some Mac mice / X11 configs
+            tree.bind("<Control-Button-1>", _comm_popup)  # macOS Ctrl+Click fallback
+        except Exception:
+            logger.exception("Caught exception setting up commission context menu", exc_info=True)
+
             
     def open_vouchers_for_binding(self, commission_id: int):
         """
@@ -4809,7 +4814,7 @@ class VoucherApp(ctk.CTk):
         local_refresh()
         
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
-        vsb.pack(side="left", fill="y")
+        vsb.pack(side="right", fill="y")
         tree.configure(yscrollcommand=vsb.set)
 
         def _load_vouchers(q=""):
