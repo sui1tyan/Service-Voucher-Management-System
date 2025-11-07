@@ -1,5 +1,4 @@
 import os, sys, io, json, zipfile, shutil, sqlite3, webbrowser, re
-import time 
 import tkinter as tk
 import customtkinter as ctk
 import io
@@ -457,216 +456,315 @@ STATUS_CANONICAL = {
     "returned": "returned"
 }
 
-def normalize_status_for_search(status):
+def normalize_status_for_search(raw_status, fuzzy_status=False):
     """
-    Convert a user-supplied status filter into a safe WHERE clause fragment.
-
+    Normalize a user-provided status string for safe searching.
+    - raw_status: the string entered by the user (may be None/empty)
+    - fuzzy_status: when True allow a safe LIKE ('%...%') fallback on the full token (NOT prefix).
     Returns:
-      (clause: str, params: tuple)
-
-    Example:
-      ("AND status = ?", ("paid",))
-    For 'all' or falsy input returns ("", ())
-    For unknown status returns ("AND 0=1", ())
+      (sql_clause_fragment, params)
+      - sql_clause_fragment: e.g. "AND LOWER(status) = ?"
+      - params: list of params to bind
+    If raw_status is falsy, returns ("", [])
     """
-    allowed_statuses = {
-        "paid": "paid",
-        "unpaid": "unpaid",
-        "void": "void",
-        "partpaid": "partpaid",
-        "refunded": "refunded",
-        # extend as needed
-    }
+    if not raw_status:
+        return "", []
 
-    if not status:
-        return ("", ())
+    s = raw_status.strip().lower()
+    # Map exact synonyms to canonical
+    if s in STATUS_CANONICAL:
+        canon = STATUS_CANONICAL[s]
+        return "AND LOWER(status) = ?", [canon.lower()]
 
-    s = str(status).strip().lower()
-    if s == "all":
-        return ("", ())
+    # If user supplied a comma-separated list, support explicit list (clean & whitelist)
+    if "," in s:
+        items = [it.strip().lower() for it in s.split(",") if it.strip()]
+        mapped = []
+        for it in items:
+            if it in STATUS_CANONICAL:
+                mapped.append(STATUS_CANONICAL[it].lower())
+            else:
+                # unknown token -> keep as-is only if fuzzy permitted
+                if fuzzy_status:
+                    mapped.append(it)
+        if mapped:
+            placeholders = ",".join("?" for _ in mapped)
+            return f"AND LOWER(status) IN ({placeholders})", mapped
 
-    if s in allowed_statuses:
-        return ("AND status = ?", (allowed_statuses[s],))
+    # As a last resort, if fuzzy_status True, do a safe LIKE on the full token
+    if fuzzy_status:
+        return "AND LOWER(status) LIKE ?", [f"%{s}%"]
 
-    # Unknown status -> safe no-match clause (explicit and easy to debug)
-    logger.warning("normalize_status_for_search: unknown status filter '%s' -> returning no-match clause", status)
-    return ("AND 0=1", ())
+    # Unknown/ambiguous status and no fuzzy allowed: return a clause that matches nothing
+    # (this is safer than guessing)
+    return "AND 0", []
 
-
-# Backwards-compatible wrapper if other code expects a single string
-def normalize_status_for_search_str(status):
-    clause, params = normalize_status_for_search(status)
-    # If params empty, return clause as-is; otherwise we still return clause string (params must be passed separately)
-    return clause
-
-
-def init_db(db_path=DB_FILE, migrations=None):
+def init_db(db_path=DB_FILE):
     """
     Initialize DB and run safe migrations.
-
-    - Creates a timestamped backup before destructive changes.
-    - Runs migrations inside BEGIN IMMEDIATE to avoid partial commits.
-    - Archives duplicates (moves into <table>__duplicates) rather than deleting them.
-    - Attempts to create unique indexes after dedup/archiving.
-    - Returns a live sqlite3.Connection on success (caller responsible for close()).
-    - Raises on irrecoverable errors.
+    - Creates a timestamped DB backup before destructive changes (if helper exists).
+    - Ensures users table migration (adds 'sales assistant' role).
+    - Adds missing voucher columns safely.
+    - Ensures commissions schema (voucher_id column) via ensure_commissions_schema.
+    - Creates useful indices and enforces uniqueness after cleaning legacy duplicates.
+    - Creates a default admin account if none exists (may force password change).
+    Returns sqlite3.Connection on success.
+    Raises on failure.
     """
-    # Ensure DB path
-    if not db_path:
-        raise RuntimeError("init_db: DB file path not provided")
-
-    # Ensure DB file exists
-    if not os.path.exists(db_path):
-        open(db_path, "a").close()
-
-    # Make timestamped backup
+    conn = None
     try:
-        backups_dir = os.path.join(os.path.dirname(db_path) or ".", "db_backups")
-        os.makedirs(backups_dir, exist_ok=True)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        backup_path = os.path.join(backups_dir, f"{os.path.basename(db_path)}.{timestamp}.bak")
-        shutil.copy2(db_path, backup_path)
-        logger.info("Database backup created at %s", backup_path)
-    except Exception:
-        logger.exception("Failed to create DB backup before init_db; aborting")
-        raise
-
-    # Connect
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    try:
+        # Open connection early so we can run scripts and PRAGMAs safely
+        conn = sqlite3.connect(db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("PRAGMA foreign_keys = ON")
 
-        # If no migrations supplied, do safe non-destructive checks and return
-        if not migrations:
-            logger.info("init_db: no migrations provided — backup only. Re-opening a fresh connection and returning.")
-            try:
-                # commit & close the current connection used for backup work to ensure no locks are held
+        # Apply base schema (idempotent). Run inside try/except so we continue if it fails.
+        try:
+            cur.executescript(BASE_SCHEMA)
+            conn.commit()
+        except Exception:
+            logger.exception("Failed to apply BASE_SCHEMA (continuing)")
+
+        # Helper to safely cast voucher_id to integer for ordering/de-dup purposes
+        def _safe_vid_expr(col_name="voucher_id"):
+            return f"CASE WHEN {col_name} GLOB '[0-9]*' THEN CAST({col_name} AS INTEGER) ELSE NULL END"
+
+        # --- MIGRATION: ensure users.role allows 'sales assistant' ---
+        try:
+            cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
+            row = cur.fetchone()
+            ddl = (row[0] or "") if row else ""
+            if "sales assistant" not in ddl:
+                # attempt backup if available
+                try:
+                    if "_ensure_db_backup" in globals():
+                        try:
+                            _ensure_db_backup(cur)
+                        except Exception:
+                            logger.exception("Failed to create DB backup before users table migration")
+                except Exception:
+                    logger.exception("Unexpected error invoking backup helper before users migration")
+
+                # Rename and recreate users table with sales assistant role allowed
+                cur.execute("ALTER TABLE users RENAME TO users_old")
+                cur.execute("""
+                    CREATE TABLE users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT UNIQUE,
+                        role TEXT CHECK(role IN ('admin','sales assistant','user','technician')),
+                        password_hash BLOB,
+                        is_active INTEGER DEFAULT 1,
+                        must_change_pwd INTEGER DEFAULT 0,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO users(id, username, role, password_hash, is_active, must_change_pwd, created_at, updated_at)
+                    SELECT id,
+                           username,
+                           CASE WHEN role='supervisor' THEN 'sales assistant' ELSE role END,
+                           password_hash, is_active, must_change_pwd, created_at, updated_at
+                    FROM users_old
+                """)
+                cur.execute("DROP TABLE users_old")
                 conn.commit()
+                logger.info("users table migration (sales assistant role) completed.")
+        except Exception:
+            logger.exception("users table migration failed; check DB state")
+
+        # Trim status whitespace (safe no-op if column missing)
+        try:
+            cur.execute("UPDATE vouchers SET status = TRIM(status)")
+            conn.commit()
+        except Exception:
+            logger.exception("Failed to TRIM(vouchers.status) — continuing")
+
+        # --- Add missing voucher columns safely (whitelisted) ---
+        voucher_columns = [
+            ("technician_id", "TEXT"),
+            ("technician_name", "TEXT"),
+            ("ref_bill", "TEXT"),
+            ("ref_bill_date", "TEXT"),
+            ("amount_rm", "REAL"),
+            ("tech_commission", "REAL"),
+            ("reminder_pickup_1", "TEXT"),
+            ("reminder_pickup_2", "TEXT"),
+            ("reminder_pickup_3", "TEXT"),
+        ]
+        for col, typ in voucher_columns:
+            try:
+                cur.execute(f"PRAGMA table_info(vouchers)")
+                existing_cols = [r[1] for r in cur.fetchall()]
+                if col not in existing_cols:
+                    if "add_column_safe" in globals():
+                        add_column_safe(cur, "vouchers", col, typ)
+                    else:
+                        if not re.match(r"^[A-Za-z0-9_]+$", col):
+                            raise ValueError(f"Unsafe column name: {col}")
+                        cur.execute(f"ALTER TABLE vouchers ADD COLUMN {col} {typ}")
+                    logger.info("Added column %s to vouchers", col)
             except Exception:
-                # ignore commit errors on this lightweight path
+                logger.exception("Failed adding column %s to vouchers (continuing)", col)
+        try:
+            conn.commit()
+        except Exception:
+            logger.exception("commit failed after adding voucher columns")
+
+        # --- Ensure commissions schema (voucher_id column) ---
+        try:
+            if "ensure_commissions_schema" in globals():
+                ok = ensure_commissions_schema(conn)
+                if not ok:
+                    logger.warning("ensure_commissions_schema reported failure. Check DB and logs.")
+        except Exception:
+            logger.exception("ensure_commissions_schema call failed during init_db()")
+
+        # --- Indexes and uniqueness constraints; create non-unique indexes ---
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_created ON vouchers(created_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_status ON vouchers(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vouchers_customer ON vouchers(customer_name)")
+            conn.commit()
+        except Exception:
+            logger.exception("Failed creating non-unique indexes; continuing")
+
+        # --- Clean legacy duplicates for vouchers.ref_bill (destructive) ---
+        try:
+            try:
+                if "_ensure_db_backup" in globals():
+                    _ensure_db_backup(cur)
+            except Exception:
+                logger.exception("Failed to create DB backup before cleaning vouchers.ref_bill duplicates")
+
+            cur.execute("BEGIN")
+            safe_vid = _safe_vid_expr("voucher_id")
+            cur.execute(f"""
+                DELETE FROM vouchers
+                WHERE ref_bill IS NOT NULL AND ref_bill <> ''
+                  AND {safe_vid} NOT IN (
+                    SELECT MAX({safe_vid}) FROM vouchers
+                    WHERE ref_bill IS NOT NULL AND ref_bill <> ''
+                    GROUP BY LOWER(ref_bill)
+                  )
+            """)
+            conn.commit()
+            logger.info("Legacy voucher duplicates cleaned (ref_bill).")
+        except Exception:
+            logger.exception("Failed to clean voucher duplicates; performing ROLLBACK")
+            try:
+                conn.rollback()
+            except Exception:
                 pass
+
+        # Create unique index for ref_bill
+        try:
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_ref_bill_unique_ci
+                ON vouchers(LOWER(ref_bill))
+                WHERE ref_bill IS NOT NULL AND ref_bill <> ''
+            """)
+            conn.commit()
+        except Exception:
+            logger.exception("Failed creating unique index for vouchers.ref_bill; check duplicates/logs")
+
+        # --- Clean legacy duplicates for commissions ---
+        try:
+            try:
+                if "_ensure_db_backup" in globals():
+                    _ensure_db_backup(cur)
+            except Exception:
+                logger.exception("Failed to create DB backup before cleaning commissions duplicates")
+
+            cur.execute("BEGIN")
+            cur.execute("""
+                DELETE FROM commissions
+                WHERE id NOT IN (
+                    SELECT MAX(id) FROM commissions
+                    WHERE bill_no IS NOT NULL AND bill_no <> ''
+                    GROUP BY bill_type, LOWER(bill_no)
+                )
+            """)
+            conn.commit()
+            logger.info("Legacy commissions duplicates cleaned.")
+        except Exception:
+            logger.exception("Failed to clean commissions duplicates; rolling back")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        # Create unique index for commissions (bill_type + LOWER(bill_no))
+        try:
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_unique_global
+                ON commissions(bill_type, LOWER(bill_no))
+                WHERE bill_no IS NOT NULL AND bill_no <> ''
+            """)
+            conn.commit()
+        except Exception:
+            logger.exception("Failed creating unique index for commissions; check duplicates/logs")
+
+        # --- Ensure base_vid setting exists ---
+        try:
+            _get_setting(cur, "base_vid", DEFAULT_BASE_VID)
+            conn.commit()
+        except Exception:
+            logger.exception("Failed to ensure base_vid setting")
+
+        # --- Ensure at least one admin user exists; create default if none ---
+        try:
+            cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+            admin_count = cur.fetchone()[0]
+            if admin_count == 0:
+                # Use module-level defaults if present
+                default_user = globals().get("DEFAULT_ADMIN_USERNAME", "tonycom")
+                default_pwd = globals().get("DEFAULT_ADMIN_PASSWORD", "admin123")
+
+                must_change = 0
+                try:
+                    policy_err = validate_password_policy(default_pwd)
+                    if policy_err:
+                        must_change = 1
+                        logger.warning(
+                            "Default admin password does not satisfy password policy: %s. "
+                            "Creating account with must_change_pwd=1.",
+                            policy_err
+                        )
+                except Exception:
+                    must_change = 1
+                    logger.exception("validate_password_policy raised exception; setting must_change_pwd=1")
+
+                ts = datetime.now().isoformat(sep=' ', timespec='seconds')
+                try:
+                    hashed = _hash_pwd(default_pwd)
+                    cur.execute(
+                        "INSERT OR IGNORE INTO users (username, role, password_hash, must_change_pwd, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                        (default_user, "admin", hashed, must_change, ts, ts)
+                    )
+                    conn.commit()
+                    if must_change:
+                        logger.warning("Default admin '%s' created; user must change password at first login.", default_user)
+                    else:
+                        logger.info("Default admin '%s' created with default password.", default_user)
+                except sqlite3.IntegrityError:
+                    # Already exists - ignore
+                    logger.info("Admin user already exists (race or unique constraint).")
+                except Exception:
+                    logger.exception("Failed to create default admin user.")
+        except Exception:
+            logger.exception("Failed to ensure default admin user")
+
+        # All migrations completed successfully; return the live connection
+        return conn
+
+    except Exception:
+        logger.exception("init_db failed")
+        if conn:
             try:
                 conn.close()
             except Exception:
                 pass
-            # return a fresh connection (clean state)
-            conn = sqlite3.connect(db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
-            return conn
-
-        # Helpers
-        def _safe_vid_expr(col_name="voucher_id"):
-            return f"CASE WHEN {col_name} GLOB '[0-9]*' THEN CAST({col_name} AS INTEGER) ELSE NULL END"
-
-        def _find_duplicate_keys(table, key_expr):
-            # key_expr is a SQL expression (e.g. "LOWER(ref_bill)") or column name
-            q = f"SELECT {key_expr} as k, COUNT(*) as c FROM {table} GROUP BY {key_expr} HAVING c > 1"
-            cur.execute(q)
-            return [row["k"] for row in cur.fetchall()]
-
-        def _ensure_archive_table(table):
-            archive = f"{table}__duplicates"
-            # Create archive table with same columns (best-effort copy of schema)
-            cur.execute(f"CREATE TABLE IF NOT EXISTS {archive} AS SELECT * FROM {table} WHERE 0")
-            return archive
-
-        def _archive_duplicates_by_key(table, key_column, lower=False):
-            """
-            Move duplicates for key_column into table__duplicates, keeping the oldest/first row.
-            key_column: the column name (string)
-            lower: if True compares LOWER(key_column)
-            Returns number of rows moved.
-            """
-            key_expr = f"LOWER({key_column})" if lower else key_column
-            dup_keys = _find_duplicate_keys(table, key_expr)
-            if not dup_keys:
-                return 0
-            archive = _ensure_archive_table(table)
-            moved = 0
-            for key in dup_keys:
-                # select rowids ordered so we keep the first (smallest rowid) and move the rest
-                # Use parameterized query for the key value
-                if key is None:
-                    continue
-                if isinstance(key, str):
-                    qval = key
-                else:
-                    qval = str(key)
-                # Build condition respecting LOWER if needed
-                cond = f"LOWER({key_column}) = ?" if lower else f"{key_column} = ?"
-                cur.execute(f"SELECT rowid FROM {table} WHERE {cond} ORDER BY rowid", (qval,))
-                rowids = [r["rowid"] for r in cur.fetchall()]
-                if len(rowids) <= 1:
-                    continue
-                keep = rowids[0]
-                to_move = rowids[1:]
-                for rid in to_move:
-                    cur.execute(f"INSERT INTO {archive} SELECT * FROM {table} WHERE rowid = ?", (rid,))
-                    cur.execute(f"DELETE FROM {table} WHERE rowid = ?", (rid,))
-                    moved += 1
-            logger.warning("Archived %d duplicate rows from %s into %s", moved, table, archive)
-            return moved
-
-        # Begin immediate transaction for migrations
-        cur.execute("BEGIN IMMEDIATE")
-        try:
-            # Process migrations list. Accept: SQL strings, ('executescript', script), or dict instructions.
-            for item in migrations:
-                if isinstance(item, str):
-                    cur.execute(item)
-                elif isinstance(item, tuple) and item and item[0] == "executescript":
-                    cur.executescript(item[1])
-                elif isinstance(item, dict):
-                    typ = item.get("type")
-                    if typ == "create_unique_index":
-                        table = item["table"]
-                        column = item["column"]
-                        index_name = item.get("index_name") or f"ux_{table}_{column}"
-                        lower = bool(item.get("lower"))
-                        # detect duplicates first
-                        key_expr = f"LOWER({column})" if lower else column
-                        cur.execute(f"SELECT COUNT(*) as cnt FROM (SELECT {key_expr} as k FROM {table} WHERE {column} IS NOT NULL AND {column} <> '' GROUP BY {key_expr} HAVING COUNT(*) > 1)")
-                        dup_count = cur.fetchone()["cnt"]
-                        if dup_count and dup_count > 0:
-                            logger.warning("Detected %d duplicate keys in %s.%s — archiving duplicates before creating unique index", dup_count, table, column)
-                            _archive_duplicates_by_key(table, column, lower=lower)
-                        # attempt to create unique index
-                        try:
-                            # SQLite supports IF NOT EXISTS for CREATE UNIQUE INDEX
-                            expr = f"LOWER({column})" if lower else column
-                            sql = f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table} ({expr}) WHERE {column} IS NOT NULL AND {column} <> ''"
-                            cur.execute(sql)
-                            logger.info("Created/ensured unique index %s on %s(%s)", index_name, table, column)
-                        except sqlite3.DatabaseError:
-                            logger.exception("Could not create unique index %s on %s(%s)", index_name, table, column)
-                    else:
-                        logger.warning("Unknown migration dict instruction: %r — skipping", item)
-                else:
-                    logger.warning("Unsupported migration item type: %r — skipping", item)
-
-            # Commit migrations
-            conn.commit()
-            logger.info("Migrations applied successfully")
-        except Exception:
-            # rollback migration transaction
-            try:
-                conn.rollback()
-            except Exception:
-                logger.exception("Failed to rollback migration transaction")
-            raise
-
-        # If we reach here, return live connection
-        return conn
-
-    except Exception:
-        # close connection on failure and re-raise
-        try:
-            conn.close()
-        except Exception:
-            pass
-        logger.exception("init_db encountered an error")
         raise
 
 def bind_commission_to_voucher(commission_id, voucher_id):
@@ -747,38 +845,19 @@ def _read_base_vid():
 
 
 def next_voucher_id():
-    """
-    Atomic voucher id allocator using a small sequences table.
-    Returns string voucher id.
-    """
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")  # acquire reserved lock
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS sequences (
-                key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL
-            )
-        """)
-        base = DEFAULT_BASE_VID
-        cur.execute("INSERT OR IGNORE INTO sequences (key, value) VALUES (?, ?)", ("voucher", base - 1))
-        cur.execute("UPDATE sequences SET value = value + 1 WHERE key = ?", ("voucher",))
-        cur.execute("SELECT value FROM sequences WHERE key = ?", ("voucher",))
-        row = cur.fetchone()
-        if not row:
-            raise RuntimeError("Failed to allocate voucher id")
-        vid = str(row[0])
-        conn.commit()
-        return vid
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise
-    finally:
+    conn = get_conn();
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(CAST(voucher_id AS INTEGER)) FROM vouchers")
+    row = cur.fetchone()
+    if not row or row[0] is None:
+        base = _get_setting(cur, "base_vid", DEFAULT_BASE_VID)
+        conn.commit();
         conn.close()
+        return str(base)
+    nxt = str(int(row[0]) + 1)
+    conn.close()
+    return nxt
+
 
 # ---- Recipient ops ----
 def list_staffs_names():
@@ -1249,91 +1328,57 @@ def list_users():
     conn.close();
     return rows
 
-def create_user(username, password, is_admin=False, must_change_pwd=False, extra_fields=None):
+def create_user(username, password, role="user", must_change_pwd=0, extra_fields=None):
     """
-    Create a user in the users table.
-    - Allows multiple admins (no artificial single-admin restriction).
-    - Uses validate_password_policy() and _hash_pwd() hooks if present in module globals.
-    - Returns True on success, False if username exists or integrity error.
+    Create a user. Accepts plaintext password (it will be hashed).
+    Returns new user id.
     """
+    extra_fields = extra_fields or {}
+    username = (username or "").strip()
     if not username:
         raise ValueError("username required")
+    # align allowed roles with DB CHECK
+    if role not in {"admin", "sales assistant", "user", "technician"}:
+        raise ValueError(f"role must be one of {{'admin','sales assistant','user','technician'}}")
 
-    # Evaluate password policy if available
-    password_ok = True
-    if "validate_password_policy" in globals() and callable(globals()["validate_password_policy"]):
-        try:
-            policy_err = validate_password_policy(password)
-            if policy_err:
-                password_ok = False
-                logger.info("Password policy not satisfied for new user %s: %s", username, policy_err)
-        except Exception:
-            logger.exception("Error while validating password policy for user %s; treating as policy failure", username)
-            password_ok = False
+    # Validate extra fields keys
+    for k in extra_fields.keys():
+        if k not in USER_UPDATABLE_COLUMNS:
+            raise ValueError(f"unsupported field for create_user: {k}")
 
-    if not password_ok:
-        must_change_pwd = True
-
-    # Hash password
-    if "_hash_pwd" in globals() and callable(globals()["_hash_pwd"]):
-        try:
-            password_hash = _hash_pwd(password)
-        except Exception:
-            logger.exception("Password hashing failed; refusing to create user")
-            return False
-    else:
-        # Fallback: store plaintext (NOT recommended). Please provide _hash_pwd in production.
-        logger.warning("No _hash_pwd hook found — storing password in plaintext (insecure). Add a hashing function named _hash_pwd.")
-        password_hash = password
-
-    # Build insert
-    cols = ["username", "password_hash", "role", "must_change_pwd", "created_at", "updated_at"]
-    vals = [username, password_hash, "admin" if is_admin else "user", 1 if must_change_pwd else 0, datetime.now().isoformat(sep=' ', timespec='seconds'), datetime.now().isoformat(sep=' ', timespec='seconds')]
-    if extra_fields and isinstance(extra_fields, dict):
-        for k, v in extra_fields.items():
-            cols.append(k)
-            vals.append(v)
-
-    col_sql = ", ".join(cols)
-    placeholders = ", ".join(["?"] * len(cols))
-    sql = f"INSERT INTO users ({col_sql}) VALUES ({placeholders})"
-
-    conn = None
+    conn = get_conn()
     try:
-        # Use existing connection helper if present, else open direct connection
-        if "get_conn" in globals() and callable(globals()["get_conn"]):
-            conn = get_conn()
-            # get_conn might return connection already set with row_factory; do not close if it's managed elsewhere.
-            own_conn = False
-        else:
-            conn = sqlite3.connect(globals().get("DB_FILE", DB_FILE))
-            own_conn = True
+        cur = _begin_immediate_transaction(conn)
 
-        cur = conn.cursor()
-        try:
-            cur.execute(sql, vals)
-            if own_conn:
-                conn.commit()
-            else:
-                # best-effort commit if connection isn't externally managed
-                try:
-                    conn.commit()
-                except Exception:
-                    pass
-            logger.info("Created user '%s' (admin=%s)", username, bool(is_admin))
-            return True
-        except sqlite3.IntegrityError:
-            logger.warning("User creation failed: username '%s' may already exist", username)
-            return False
+        # If creating admin, ensure no other admin exists
+        if role == "admin":
+            cur.execute("SELECT COUNT(1) FROM users WHERE role = ?", ("admin",))
+            count_admins = cur.fetchone()[0]
+            if count_admins > 0:
+                raise ValueError("An admin user already exists; cannot create a second admin.")
+
+        cols = ["username", "password_hash", "role", "must_change_pwd"]
+        placeholders = ["?"] * len(cols)
+        hashed = _hash_pwd(password)
+        values = [username, hashed, role, int(bool(must_change_pwd))]
+
+        for k in extra_fields:
+            cols.append(k)
+            placeholders.append("?")
+            values.append(extra_fields[k])
+
+        sql = f"INSERT INTO users ({', '.join(cols)}) VALUES ({', '.join(placeholders)})"
+        cur.execute(sql, values)
+        uid = cur.lastrowid
+        conn.commit()
+        return uid
     except Exception:
-        logger.exception("Unexpected error creating user %s", username)
-        return False
+        logger.exception("Failed to create user")
+        conn.rollback()
+        raise
     finally:
-        try:
-            if conn and 'own_conn' in locals() and own_conn:
-                conn.close()
-        except Exception:
-            pass
+        conn.close()
+
 
 def update_user(user_id, **fields):
     """
@@ -2376,7 +2421,7 @@ class VoucherApp(ctk.CTk):
             pick = ctk.CTkToplevel(top)
             pick.title("Choose Commission")
             # Bigger, fixed-size dialog so all columns are visible.
-            pick.geometry("1400x520")
+            pick.geometry("1000x520")
             pick.resizable(False, False)
             pick.grab_set()
             
@@ -2894,7 +2939,7 @@ class VoucherApp(ctk.CTk):
             pick = ctk.CTkToplevel(top)
             pick.title("Choose Commission")
             # Bigger, fixed-size dialog so all columns are visible.
-            pick.geometry("1400x520")
+            pick.geometry("1000x520")
             pick.resizable(False, False)
             pick.grab_set()
 
