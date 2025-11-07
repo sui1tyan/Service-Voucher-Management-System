@@ -499,6 +499,7 @@ def normalize_status_for_search_str(status):
     # If params empty, return clause as-is; otherwise we still return clause string (params must be passed separately)
     return clause
 
+
 def init_db(db_path=DB_FILE, migrations=None):
     """
     Initialize DB and run safe migrations.
@@ -539,7 +540,20 @@ def init_db(db_path=DB_FILE, migrations=None):
 
         # If no migrations supplied, do safe non-destructive checks and return
         if not migrations:
-            logger.info("init_db: no migrations provided — backup only. Returning connection.")
+            logger.info("init_db: no migrations provided — backup only. Re-opening a fresh connection and returning.")
+            try:
+                # commit & close the current connection used for backup work to ensure no locks are held
+                conn.commit()
+            except Exception:
+                # ignore commit errors on this lightweight path
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            # return a fresh connection (clean state)
+            conn = sqlite3.connect(db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
             return conn
 
         # Helpers
