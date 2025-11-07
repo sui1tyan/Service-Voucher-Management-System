@@ -4591,75 +4591,75 @@ class VoucherApp(ctk.CTk):
             return
         cid, bill_type, bill_no, total_amount, commission_amount, existing_vid = crow
         
-            pick = ctk.CTkToplevel(self)
-            pick.title(f"Select Voucher to bind (Commission {commission_id})")
-            # Bigger, fixed dialog so all columns and data are visible
-            pick.geometry("1280x680")
-            pick.resizable(False, False)
-            pick.grab_set()
+        pick = ctk.CTkToplevel(self)
+        pick.title(f"Select Voucher to bind (Commission {commission_id})")
+        # Bigger, fixed dialog so all columns and data are visible
+        pick.geometry("1280x680")
+        pick.resizable(False, False)
+        pick.grab_set()
 
-            # Informational hint
-            hint = ctk.CTkLabel(
-                pick,
-                text="Choose a voucher to bind — Double-click a voucher, or select and press Bind.",
-                anchor="w"
-            )
-            hint.pack(fill="x", padx=10, pady=(10, 6))
+        # Informational hint
+        hint = ctk.CTkLabel(
+            pick,
+            text="Choose a voucher to bind — Double-click a voucher, or select and press Bind.",
+            anchor="w"
+        )
+        hint.pack(fill="x", padx=10, pady=(10, 6))
 
-            # Wrap frame for search + tree
-            wrap = ctk.CTkFrame(pick)
-            wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # Wrap frame for search + tree
+        wrap = ctk.CTkFrame(pick)
+        wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-            # Search row (left)
-            fl = ctk.CTkFrame(wrap)
-            fl.pack(fill="x", padx=6, pady=(6, 6))
-            lbl = ctk.CTkLabel(fl, text="Search:")
-            lbl.pack(side="left", padx=(0, 6))
-            e_q = ctk.CTkEntry(fl, placeholder_text="Search voucher id, customer or contact", width=560)
-            e_q.pack(side="left", padx=(0, 6))
+        # Search row (left)
+        fl = ctk.CTkFrame(wrap)
+        fl.pack(fill="x", padx=6, pady=(6, 6))
+        lbl = ctk.CTkLabel(fl, text="Search:")
+        lbl.pack(side="left", padx=(0, 6))
+        e_q = ctk.CTkEntry(fl, placeholder_text="Search voucher id, customer or contact", width=560)
+        e_q.pack(side="left", padx=(0, 6))
 
-            def local_refresh(_q=None):
-                q = (e_q.get() or "").strip()
-                qfilters = {"voucher_id": q, "customer_name": q, "contact_number": q, "limit": 500}
-                rows = search_vouchers(qfilters)
-                for r in tree.get_children():
-                    tree.delete(r)
-                for rr in rows:
-                    tree.insert("", "end", values=(
-                        rr["voucher_id"],
-                        rr["created_at"][:19] if rr["created_at"] else "",
-                        rr["customer_name"] or "",
-                        rr["contact_number"] or "",
-                        rr.get("ref_bill") or "",
-                        f"{rr.get('amount_rm') or ''}",
-                        f"{rr.get('tech_commission') or ''}",
-                        rr.get("status") or ""
-                    ))
-            # Bind Enter to refresh
-            e_q.bind("<Return>", lambda _e: local_refresh())
+        def local_refresh(_q=None):
+            q = (e_q.get() or "").strip()
+            qfilters = {"voucher_id": q, "customer_name": q, "contact_number": q, "limit": 500}
+            rows = search_vouchers(qfilters)
+            for r in tree.get_children():
+                tree.delete(r)
+            for rr in rows:
+                tree.insert("", "end", values=(
+                    rr["voucher_id"],
+                    rr["created_at"][:19] if rr["created_at"] else "",
+                    rr["customer_name"] or "",
+                    rr["contact_number"] or "",
+                    rr.get("ref_bill") or "",
+                    f"{rr.get('amount_rm') or ''}",
+                    f"{rr.get('tech_commission') or ''}",
+                    rr.get("status") or ""
+                ))
+        # Bind Enter to refresh
+        e_q.bind("<Return>", lambda _e: local_refresh())
 
-            # Tree (columns made wide so contents are not cut)
-            cols = ("voucher_id","created_at","customer_name","contact_number","ref_bill","amount_rm","tech_commission","status")
-            tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse", height=20)
-            headings = [
-                ("voucher_id","Voucher ID",140),
-                ("created_at","Created",160),
-                ("customer_name","Customer",360),
-                ("contact_number","Contact",160),
-                ("ref_bill","Ref Bill",320),
-                ("amount_rm","Amount (RM)",120),
-                ("tech_commission","Commission (RM)",160),
-                ("status","Status",140),
-            ]
-            for key, title, w in headings:
-                tree.heading(key, text=title)
-                tree.column(key, width=w, anchor="w", stretch=False)
-            tree.pack(fill="both", expand=True, padx=6, pady=(6, 8))
+        # Tree (columns made wide so contents are not cut)
+        cols = ("voucher_id","created_at","customer_name","contact_number","ref_bill","amount_rm","tech_commission","status")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse", height=20)
+        headings = [
+            ("voucher_id","Voucher ID",140),
+            ("created_at","Created",160),
+            ("customer_name","Customer",360),
+            ("contact_number","Contact",160),
+            ("ref_bill","Ref Bill",320),
+            ("amount_rm","Amount (RM)",120),
+            ("tech_commission","Commission (RM)",160),
+            ("status","Status",140),
+        ]
+        for key, title, w in headings:
+            tree.heading(key, text=title)
+            tree.column(key, width=w, anchor="w", stretch=False)
+        tree.pack(fill="both", expand=True, padx=6, pady=(6, 8))
 
-            # Double-click binding and initial populate
-            tree.bind("<Double-1>", lambda e: _do_bind_selected())  # _do_bind_selected defined below
-            local_refresh()
-
+        # Double-click binding and initial populate
+        tree.bind("<Double-1>", lambda e: _do_bind_selected())  # _do_bind_selected defined below
+        local_refresh()
+        
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         vsb.pack(side="left", fill="y")
         tree.configure(yscrollcommand=vsb.set)
