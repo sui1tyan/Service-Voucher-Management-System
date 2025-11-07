@@ -2422,8 +2422,11 @@ class VoucherApp(ctk.CTk):
             """Open a small dialog listing unbound commissions for user to choose."""
             pick = ctk.CTkToplevel(top)
             pick.title("Choose Commission")
-            pick.geometry("820x420")
+            # Bigger, fixed-size dialog so all columns are visible.
+            pick.geometry("1000x520")
+            pick.resizable(False, False)
             pick.grab_set()
+            
             wrap = ctk.CTkFrame(pick)
             wrap.pack(fill="both", expand=True, padx=8, pady=8)
             # search/filter
@@ -2438,9 +2441,9 @@ class VoucherApp(ctk.CTk):
             cols = ("ID","StaffID","StaffName","BillType","BillNo","Total","Commission","Created")
             tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
             for ccol, title, wcol in [
-                ("ID","ID",60), ("StaffID","StaffID",100), ("StaffName","Staff",180),
-                ("BillType","Type",80), ("BillNo","Bill No",180), ("Total","Total",100),
-                ("Commission","Commission",100), ("Created","Created",120)
+                ("ID","ID",60), ("StaffID","StaffID",120), ("StaffName","Staff",220),
+                ("BillType","Type",90), ("BillNo","Bill No",260), ("Total","Total",120),
+                ("Commission","Commission",200), ("Created","Created",140)
             ]:
                 tree.heading(ccol, text=title)
                 tree.column(ccol, width=wcol, anchor="w", stretch=False)
@@ -2937,8 +2940,11 @@ class VoucherApp(ctk.CTk):
             """Open commission picker dialog (similar to Add)."""
             pick = ctk.CTkToplevel(top)
             pick.title("Choose Commission")
-            pick.geometry("820x420")
+            # Bigger, fixed-size dialog so all columns are visible.
+            pick.geometry("1000x520")
+            pick.resizable(False, False)
             pick.grab_set()
+
             wrap = ctk.CTkFrame(pick)
             wrap.pack(fill="both", expand=True, padx=8, pady=8)
             fl = ctk.CTkFrame(wrap)
@@ -2951,9 +2957,9 @@ class VoucherApp(ctk.CTk):
             cols = ("ID","StaffID","StaffName","BillType","BillNo","Total","Commission","Created")
             tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
             for ccol, title, wcol in [
-                ("ID","ID",60), ("StaffID","StaffID",100), ("StaffName","Staff",180),
-                ("BillType","Type",80), ("BillNo","Bill No",180), ("Total","Total",100),
-                ("Commission","Commission",100), ("Created","Created",120)
+                ("ID","ID",60), ("StaffID","StaffID",120), ("StaffName","Staff",220),
+                ("BillType","Type",90), ("BillNo","Bill No",260), ("Total","Total",120),
+                ("Commission","Commission",200), ("Created","Created",140)
             ]:
                 tree.heading(ccol, text=title)
                 tree.column(ccol, width=wcol, anchor="w", stretch=False)
@@ -4164,20 +4170,16 @@ class VoucherApp(ctk.CTk):
         def do_search():
             refresh(e_q.get())
 
+        # keep the main toolbar items compact, remove per-row action buttons
         white_btn(bar, text="Filter", width=100, command=do_search).pack(side="left", padx=(0, 6))
         white_btn(bar, text="Refresh", width=100, command=lambda: refresh("")).pack(side="left", padx=(0, 6))
 
         btn_frame = ctk.CTkFrame(bar)
         btn_frame.pack(side="right", padx=6)
 
-        white_btn(btn_frame, text="Delete Selected", width=130, command=lambda: _delete_selected()).pack(side="right",
-                                                                                                         padx=(6, 0))
-        white_btn(btn_frame, text="Bind Selected", width=130, command=lambda: bind_selected()).pack(side="right",
-                                                                                                    padx=(6, 0))
-        white_btn(btn_frame, text="Edit Selected", width=120, command=lambda: edit_comm()).pack(side="right",
-                                                                                                 padx=(6, 0))
-        white_btn(btn_frame, text="Add Commission", width=140,
-                  command=lambda: (self.add_commission(), refresh(e_q.get()))).pack(side="right", padx=(6, 0))
+        # Keep only Add Commission, make it wider so the full label is visible
+        white_btn(btn_frame, text="Add Commission", width=200, command=lambda: (self.add_commission(), refresh(e_q.get()))).pack(side="right", padx=(6, 0))
+
 
         # --- Tree / list area ---
         wrap = ctk.CTkFrame(top)
@@ -4473,17 +4475,20 @@ class VoucherApp(ctk.CTk):
         if not crow:
             messagebox.showerror("Bind", "Commission not found.")
             return
+            
         cid, bill_type, bill_no, total_amount, commission_amount, existing_vid = crow
-        if existing_vid:
-            messagebox.showerror("Bind", f"Commission is already bound to voucher {existing_vid}.")
-            return
+        # Allow re-binding a commission that was previously bound; we'll clear the old voucher's commission columns
+        # when the user confirms binding to a new voucher (done later).
+        # (No early return here.)
 
         pick = ctk.CTkToplevel(self)
         pick.title(f"Select Voucher to bind (Commission {commission_id})")
-        pick.geometry("980x520")
+        # Larger, fixed dialog
+        pick.geometry("1100x560")
+        pick.resizable(False, False)
         pick.grab_set()
 
-        hint = ctk.CTkLabel(pick, text=f"Choose a voucher to bind to commission {commission_id} ({bill_type} {bill_no}). Double-click a voucher or select and press Bind.", anchor="w")
+        hint = ctk.CTkLabel(pick, text=f"Choose a voucher to bind — Double-click a voucher or select and press Bind.", anchor="w")
         hint.pack(fill="x", padx=8, pady=(8,4))
 
         wrap = ctk.CTkFrame(pick)
@@ -4500,19 +4505,19 @@ class VoucherApp(ctk.CTk):
         cols = ("voucher_id","created_at","customer_name","contact_number","ref_bill","amount_rm","tech_commission","status")
         tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
         headings = [
-            ("voucher_id","Voucher ID",100),
+            ("voucher_id","Voucher ID",120),
             ("created_at","Created",140),
-            ("customer_name","Customer",220),
-            ("contact_number","Contact",120),
-            ("ref_bill","Ref Bill",180),
-            ("amount_rm","Amount",100),
-            ("tech_commission","Commission",120),
-            ("status","Status",100),
+            ("customer_name","Customer",260),
+            ("contact_number","Contact",140),
+            ("ref_bill","Ref Bill",220),
+            ("amount_rm","Amount",110),
+            ("tech_commission","Commission",180),
+            ("status","Status",120),
         ]
         for key, title, w in headings:
             tree.heading(key, text=title)
             tree.column(key, width=w, anchor="w", stretch=False)
-        tree.pack(fill="both", expand=True, padx=(0,6), pady=6)
+        tree.pack(fill="both", expand=True, padx=6, pady=(0,6))
 
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         vsb.pack(side="left", fill="y")
@@ -4550,14 +4555,15 @@ class VoucherApp(ctk.CTk):
                 messagebox.showinfo("Bind", "Select a voucher to bind.", parent=pick)
                 return
             vid = sel[0]
+            
             # Validate voucher exists (should)
             conn = get_conn()
             cur = conn.cursor()
-            cur.execute("SELECT voucher_id FROM vouchers WHERE voucher_id=?", (vid,))
-            vrow = cur.fetchone()
+            cur.execute("SELECT id FROM commissions WHERE voucher_id=?", (vid,))
+            ex = cur.fetchone()
             conn.close()
-            if not vrow:
-                messagebox.showerror("Bind", f"Voucher {vid} not found.", parent=pick)
+            if ex and ex[0] != cid:
+                messagebox.showerror("Bind", f"Voucher {vid} is already bound to commission id {ex[0]}.", parent=pick)
                 return
 
             # Ensure voucher not already bound to another commission
@@ -4569,6 +4575,38 @@ class VoucherApp(ctk.CTk):
             if ex:
                 messagebox.showerror("Bind", f"Voucher {vid} is already bound to commission id {ex[0]}.", parent=pick)
                 return
+
+            # If this commission was previously bound to another voucher, clear commission-related fields on the old voucher.
+            try:
+                if existing_vid:
+                    conn_old = get_conn()
+                    cur_old = conn_old.cursor()
+                    cur_old.execute("PRAGMA table_info(vouchers)")
+                    vcols_old = [r[1] for r in cur_old.fetchall()]
+                    
+                    # Build safe update to clear the common commission fields if they exist.
+                    updates = []
+                    params = []
+                    if "tech_commission" in vcols_old:
+                        updates.append("tech_commission = NULL")
+                    if "amount_rm" in vcols_old:
+                        updates.append("amount_rm = NULL")
+                    if "technician_id" in vcols_old:
+                        updates.append("technician_id = NULL")
+                    if "technician_name" in vcols_old:
+                        updates.append("technician_name = NULL")
+                    if "ref_bill" in vcols_old:
+                        updates.append("ref_bill = ''")
+                    if updates:
+                        sql_clear = f"UPDATE vouchers SET {', '.join(updates)} WHERE voucher_id = ?"
+                        cur_old.execute(sql_clear, (existing_vid,))
+                        conn_old.commit()
+                    try:
+                        conn_old.close()
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception("Failed clearing old voucher commission fields (continuing)")
 
             # Perform binding using helper (handles column creation if needed)
             try:
@@ -4585,6 +4623,8 @@ class VoucherApp(ctk.CTk):
                 vcols = [r[1] for r in cur.fetchall()]
                 updates = []
                 params = []
+                if "technician_id" in vcols and commission_amount is not None:
+                    updates.append("technician_id = ?"); params.append(None)
                 if "ref_bill" in vcols and bill_no:
                     updates.append("ref_bill=?"); params.append(bill_no)
                 if "amount_rm" in vcols and total_amount is not None:
