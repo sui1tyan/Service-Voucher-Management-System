@@ -1,19 +1,17 @@
 import os, sys, io, json, zipfile, shutil, sqlite3, webbrowser, re
-from datetime import datetime, timedelta
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-from tkinter import simpledialog
 import customtkinter as ctk
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas as rl_canvas 
-
-
-from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
 import io
-from PIL import Image, ImageOps, ImageTk
 import bcrypt
 import logging
+from datetime import datetime, timedelta
+from tkinter import ttk, messagebox, filedialog
+from tkinter import simpledialog
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas as rl_canvas 
+from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
+from PIL import Image, ImageOps, ImageTk
 from logging.handlers import RotatingFileHandler
 
 # ------------------ Paths/Config (EARLY so logging can use APP_DIR) ------------------
