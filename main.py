@@ -1975,9 +1975,24 @@ class VoucherApp(ctk.CTk):
         self.menu_staff.add_command(label="Staff Profile", command=self.staff_profile)
         self.menu.add_cascade(label="Staff Profile", menu=self.menu_staff)
 
+        # Sales Commission menu (now includes Service & Sales Report)
         self.menu_comm = tk.Menu(self.menu, tearoff=0)
         self.menu_comm.add_command(label="Add Commission", command=self.add_commission)
         self.menu_comm.add_command(label="View/Edit Commissions", command=self.view_commissions)
+
+        # NEW: Service & Sales Report entry (defensive wiring)
+        try:
+            if hasattr(self, "service_sales_report_ui") and callable(getattr(self, "service_sales_report_ui")):
+                self.menu_comm.add_separator()
+                self.menu_comm.add_command(label="Service & Sales Report", command=self.service_sales_report_ui)
+            else:
+                # If the method isn't present, add a disabled menu item so users see the option but it does nothing.
+                self.menu_comm.add_separator()
+                self.menu_comm.add_command(label="Service & Sales Report (Not available)", state=tk.DISABLED)
+        except Exception:
+            # Fail-safe: if anything goes wrong adding the menu item, still show the other items.
+            logger.exception("Failed adding Service & Sales Report menu item", exc_info=True)
+
         self.menu.add_cascade(label="Sales Commission", menu=self.menu_comm)
 
     def _build_filters(self, parent):
