@@ -4221,7 +4221,7 @@ class VoucherApp(ctk.CTk):
             ent_name.grid(row=0, column=3, padx=(0,8), sticky="w")
             ent_name.configure(state="disabled")
 
-            ctk.CTkLabel(frm, text="Role:").grid(row=0, column=4, padx=(6,6), sticky="w")
+            ctk.CTkLabel(frm, text="Role:").grid(row=0, column=5, padx=(6,6), sticky="w")
             ent_role = ctk.CTkEntry(frm, width=160)
             ent_role.grid(row=0, column=5, padx=(0,8), sticky="w")
             ent_role.configure(state="disabled")
@@ -4246,9 +4246,9 @@ class VoucherApp(ctk.CTk):
 
             # Buttons: Generate + Reset
             btn_generate = white_btn(frm, text="Generate", width=120)
-            btn_generate.grid(row=1, column=3, padx=(6,6), sticky="e")
+            btn_generate.grid(row=1, column=4, padx=(6,6), sticky="e")
             btn_reset = white_btn(frm, text="Reset", width=120)
-            btn_reset.grid(row=1, column=4, padx=(6,6), sticky="e")
+            btn_reset.grid(row=1, column=5, padx=(6,6), sticky="e")
 
             # ---------- Table area (pack) ----------
             table_wrap = ctk.CTkFrame(top)
@@ -4590,7 +4590,7 @@ class VoucherApp(ctk.CTk):
         top = ctk.CTkToplevel(self)
         top.title("Add Commission")
         # slightly larger so form fields & buttons fit comfortably
-        top.geometry("820x520")
+        top.geometry("520x320")
         top.grab_set()
 
         frm = ctk.CTkFrame(top)
@@ -4601,8 +4601,8 @@ class VoucherApp(ctk.CTk):
         r = 0
         ctk.CTkLabel(frm, text="Staff").grid(row=r, column=0, sticky="w")
         staff_names = list_staffs_names()
-        cb_staff = ctk.CTkComboBox(frm, values=["— Select —"] + staff_names, width=420)
-        cb_staff.set("— Select —")
+        cb_staff = ctk.CTkComboBox(frm, values=["-----Select-----"] + staff_names, width=200)
+        cb_staff.set("-----Select-----")
         cb_staff.grid(row=r, column=1, sticky="w", padx=8, pady=6)
         r += 1
 
@@ -4613,7 +4613,7 @@ class VoucherApp(ctk.CTk):
         r += 1
 
         ctk.CTkLabel(frm, text="Bill No").grid(row=r, column=0, sticky="w")
-        e_bill = ctk.CTkEntry(frm, width=420)
+        e_bill = ctk.CTkEntry(frm, width=200)
         e_bill.grid(row=r, column=1, sticky="w", padx=8, pady=6)
         r += 1
 
@@ -4622,8 +4622,6 @@ class VoucherApp(ctk.CTk):
         e_total = ctk.CTkEntry(frm, width=200)
         e_total.grid(row=r, column=1, sticky="w", padx=8, pady=6)
         r += 1
-
-        # -- NOTE field removed intentionally --
 
         # Auto-prefix for bill based on type
         def _on_comm_bill_type_change(*_a):
@@ -4723,7 +4721,7 @@ class VoucherApp(ctk.CTk):
             except Exception:
                 pass
 
-        white_btn(btns, text="Save", command=save_commission, width=140).pack(side="right")
+        white_btn(btns, text="Save", command=save_commission, width=100).pack(side="right")
         white_btn(btns, text="Cancel", command=lambda: top.destroy(), width=100).pack(side="right", padx=(0,8))
 
         try:
@@ -4772,7 +4770,7 @@ class VoucherApp(ctk.CTk):
             ("staff_id", "StaffID", 110),
             ("staff_name", "Staff", 260),
             ("bill_type", "Type", 90),
-            ("bill_no", "Bill No", 340),
+            ("bill_no", "Bill No", 300),
             ("total_amount", "Total", 140),
             ("commission_amount", "Commission", 160),
             ("voucher_id", "Voucher ID", 140),
