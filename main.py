@@ -4217,12 +4217,12 @@ class VoucherApp(ctk.CTk):
 
             # Staff Name + Role (readonly entries, aligned and shortened)
             ctk.CTkLabel(frm, text="Staff Name:").grid(row=0, column=2, padx=(6,6), sticky="w")
-            ent_name = ctk.CTkEntry(frm, width=260)
+            ent_name = ctk.CTkEntry(frm, width=160)
             ent_name.grid(row=0, column=3, padx=(0,8), sticky="w")
             ent_name.configure(state="disabled")
 
             ctk.CTkLabel(frm, text="Role:").grid(row=0, column=4, padx=(6,6), sticky="w")
-            ent_role = ctk.CTkEntry(frm, width=200)
+            ent_role = ctk.CTkEntry(frm, width=160)
             ent_role.grid(row=0, column=5, padx=(0,8), sticky="w")
             ent_role.configure(state="disabled")
 
@@ -4239,16 +4239,16 @@ class VoucherApp(ctk.CTk):
             e_from = ctk.CTkEntry(frm, width=160)
             e_from.grid(row=1, column=1, padx=(0,8), sticky="w")
             ctk.CTkLabel(frm, text="Date To (DD-MM-YYYY):").grid(row=1, column=2, padx=(6,6), sticky="w")
-            e_to = ctk.CTkEntry(frm, width=200)
+            e_to = ctk.CTkEntry(frm, width=160)
             e_to.grid(row=1, column=3, padx=(0,8), sticky="w")
             e_to.delete(0, "end")
             e_to.insert(0, _to_ui_date(datetime.now()))
 
             # Buttons: Generate + Reset
             btn_generate = white_btn(frm, text="Generate", width=120)
-            btn_generate.grid(row=1, column=5, padx=(6,6), sticky="e")
+            btn_generate.grid(row=1, column=3, padx=(6,6), sticky="e")
             btn_reset = white_btn(frm, text="Reset", width=120)
-            btn_reset.grid(row=1, column=6, padx=(6,6), sticky="e")
+            btn_reset.grid(row=1, column=4, padx=(6,6), sticky="e")
 
             # ---------- Table area (pack) ----------
             table_wrap = ctk.CTkFrame(top)
@@ -4257,10 +4257,10 @@ class VoucherApp(ctk.CTk):
             cols = ("bill_date", "bill_no", "bill_amount", "commission_amount")
             tree = ttk.Treeview(table_wrap, columns=cols, show="headings", selectmode="browse")
             headings = [
-                ("bill_date", "Bill Date", 140),
-                ("bill_no", "Bill No.", 200),
+                ("bill_date", "Bill Date", 200),
+                ("bill_no", "Bill No.", 250),
                 ("bill_amount", "Bill Amount (RM)", 200),
-                ("commission_amount", "Commission Amount (RM)", 200),
+                ("commission_amount", "Commission Amount (RM)", 250),
             ]
             for key, title, w in headings:
                 tree.heading(key, text=title)
@@ -4277,8 +4277,8 @@ class VoucherApp(ctk.CTk):
             total_lbl = ctk.CTkLabel(bottom, text="Total Commission (RM):", anchor="e")
             total_val = ctk.CTkEntry(bottom, width=200)
             total_val.configure(state="disabled")
-            total_lbl.pack(side="right", padx=(6,4))
-            total_val.pack(side="right", padx=(0,16))
+            total_lbl.pack(side="left", padx=(0,4))
+            total_val.pack(side="left", padx=(0,16))
 
             # ---------- Helper functions (defined after widgets exist) ----------
             def open_staff_chooser():
