@@ -4172,14 +4172,15 @@ class VoucherApp(ctk.CTk):
     # ----------------- Service / Sales Report UI -----------------
     def service_sales_report_ui(self):
         """
-        Service / Sales Report: show commission records for a chosen staff or for All Staff.
-        Filter: Choose Staff (opens Staff Profile pick mode), Staff Name (readonly), Role (readonly),
-                Date From (empty default) and Date To (defaults to today).
-        Table columns: Bill Date, Bill No, Bill Amount (RM), Commission Amount (RM).
-        Total Commission displayed at top-right.
-        Optional "All Staff" mode and "Show Details" toggle to show linked voucher rows.
+        Service & Sales Report UI.
+        - Choose Staff (opens a small chooser dialog)
+        - All Staff (aggregated) mode
+        - Date from / to filters (UI: DD-MM-YYYY). Date To defaults to today.
+        - Table columns: Bill Date | Bill No. | Bill Amount | Commission Amount
+        - Total Commission displayed at bottom-right.
+        - Show Details checkbox: double-click a row to open related vouchers.
         """
-        # single-instance guard
+        # Single-instance guard
         self._open_windows = getattr(self, "_open_windows", {})
         if self._open_windows.get("service_sales_report"):
             try:
@@ -4192,458 +4193,406 @@ class VoucherApp(ctk.CTk):
 
         top = ctk.CTkToplevel(self)
         top.title("Service / Sales Report")
-        top.geometry("1100x720")
+        top.geometry("1100x680")
         top.resizable(False, False)
         top.grab_set()
         self._open_windows["service_sales_report"] = top
         top.protocol("WM_DELETE_WINDOW", lambda: (self._open_windows.pop("service_sales_report", None), top.destroy()))
 
-        # State for selected staff
-        sel_staff = {"db_id": None, "staff_id_opt": "", "name": "", "position": "", "phone": ""}
-
-        # -- Filters frame --
-        filt = ctk.CTkFrame(top)
-        filt.pack(fill="x", padx=10, pady=(10, 6))
-        filt.grid_columnconfigure(1, weight=1)
-
-        # Choose Staff button (will hide after selection)
-        lbl_staff_id = ctk.CTkLabel(filt, text="Staff ID:")
-        lbl_staff_id.grid(row=0, column=0, sticky="w", padx=(6,6))
-        btn_choose = white_btn(filt, text="Choose Staff", width=140)
-        btn_choose.grid(row=0, column=1, sticky="w", padx=(0,6))
-
-        # "All Staff" checkbox (when checked, ignore chosen staff)
+        # State holders for the chosen staff (DB id, staff_id_opt, name, role)
+        selected = {"db_id": None, "staff_id_opt": None, "name": None, "role": None}
+        # All-staff toggle
         all_staff_var = tk.BooleanVar(value=False)
-        chk_all = ctk.CTkCheckBox(filt, text="All Staff", variable=all_staff_var)
-        chk_all.grid(row=0, column=2, sticky="w", padx=(8,6))
 
-        # After selection, we'll show a readonly entry for staff id, and name + role entries
-        e_staff_id = ctk.CTkEntry(filt, width=160)
-        e_staff_name = ctk.CTkEntry(filt, width=360)
-        e_staff_role = ctk.CTkEntry(filt, width=200)
+        # ---------- Top filter frame ----------
+        frm = ctk.CTkFrame(top)
+        frm.pack(fill="x", padx=8, pady=(8, 6))
 
-        # date inputs
-        ctk.CTkLabel(filt, text="Date From (DD-MM-YYYY):").grid(row=1, column=0, sticky="w", padx=(6,6), pady=(8,0))
-        e_from = ctk.CTkEntry(filt, width=180)
-        e_from.grid(row=1, column=1, sticky="w", padx=(0,6), pady=(8,0))
-        ctk.CTkLabel(filt, text="Date To (DD-MM-YYYY):").grid(row=1, column=2, sticky="w", padx=(6,6), pady=(8,0))
-        e_to = ctk.CTkEntry(filt, width=180)
-        e_to.insert(0, _to_ui_date(datetime.now()))
-        e_to.grid(row=1, column=3, sticky="w", padx=(0,6), pady=(8,0))
+        # Row 0: Staff ID chooser and readonly fields for name + role
+        lbl_sid = ctk.CTkLabel(frm, text="Staff ID:")
+        lbl_sid.grid(row=0, column=0, padx=(6,6), pady=6, sticky="w")
 
-        # Buttons: Generate, Clear Staff
-        btn_frame = ctk.CTkFrame(filt)
-        btn_frame.grid(row=0, column=4, rowspan=2, sticky="e", padx=(6,6))
-        gen_btn = white_btn(btn_frame, text="Generate", width=120)
-        gen_btn.pack(side="top", pady=(6,4))
-        clear_btn = white_btn(btn_frame, text="Clear Staff", width=120)
-        clear_btn.pack(side="top", pady=(0,4))
+        # Placeholder frame where either "Choose Staff" button or the readonly id label will appear
+        sid_holder = ctk.CTkFrame(frm, corner_radius=4)
+        sid_holder.grid(row=0, column=1, padx=(0,8), pady=6, sticky="w")
 
-        # Show Details toggle (for linked vouchers)
-        show_details_var = tk.BooleanVar(value=False)
-        chk_details = ctk.CTkCheckBox(filt, text="Show Details", variable=show_details_var)
-        chk_details.grid(row=0, column=5, rowspan=2, sticky="e", padx=(8,6))
+        # Function to render the Choose Staff button
+        def render_choose_button():
+            for w in sid_holder.winfo_children():
+                w.destroy()
+            btn = white_btn(sid_holder, text="Choose Staff", width=120)
+            btn.pack(side="left")
+            btn.configure(command=open_staff_chooser)
 
-        # handler to be passed to staff_profile as pick_callback
-        def _on_staff_chosen(info):
-            try:
-                sel_staff["db_id"] = info.get("id")
-                sel_staff["staff_id_opt"] = info.get("staff_id_opt") or ""
-                sel_staff["name"] = info.get("name") or ""
-                sel_staff["position"] = info.get("position") or ""
-                sel_staff["phone"] = info.get("phone") or ""
-                # hide the choose button and show entries
-                try:
-                    btn_choose.grid_forget()
-                except Exception:
-                    pass
-                # populate and show readonly entries
-                e_staff_id.configure(state="normal")
-                e_staff_id.delete(0, "end")
-                e_staff_id.insert(0, sel_staff["staff_id_opt"] or "(no-id)")
-                e_staff_id.configure(state="readonly")
-                e_staff_id.grid(row=0, column=1, sticky="w", padx=(0,6))
-                e_staff_name.configure(state="normal")
-                e_staff_name.delete(0, "end")
-                e_staff_name.insert(0, sel_staff["name"])
-                e_staff_name.configure(state="readonly")
-                e_staff_name.grid(row=0, column=2, sticky="w", padx=(6,6))
-                e_staff_role.configure(state="normal")
-                e_staff_role.delete(0, "end")
-                e_staff_role.insert(0, sel_staff["position"])
-                e_staff_role.configure(state="readonly")
-                e_staff_role.grid(row=0, column=3, sticky="w", padx=(6,6))
-            except Exception:
-                logger.exception("Failed to apply chosen staff", exc_info=True)
+        # Readonly ID label (shown after selection or when All Staff)
+        lbl_selected_id = ctk.CTkLabel(sid_holder, text="", anchor="w")
 
-        def _choose_staff():
-            # open staff_profile in pick mode
-            try:
-                self.staff_profile(pick_callback=_on_staff_chosen)
-            except Exception:
-                try:
-                    self.staff_profile()
-                except Exception:
-                    logger.exception("Failed to open staff profile for choosing staff", exc_info=True)
+        # Staff Name label + non-editable entry (shortened)
+        ctk.CTkLabel(frm, text="Staff Name:").grid(row=0, column=2, padx=(6,6), sticky="w")
+        ent_name = ctk.CTkEntry(frm, width=300)
+        ent_name.grid(row=0, column=3, padx=(0,8), sticky="w")
+        ent_name.configure(state="disabled")
 
-        btn_choose.configure(command=_choose_staff)
+        # Role label + non-editable entry (aligned with date inputs)
+        ctk.CTkLabel(frm, text="Role:").grid(row=0, column=4, padx=(6,6), sticky="w")
+        ent_role = ctk.CTkEntry(frm, width=200)
+        ent_role.grid(row=0, column=5, padx=(0,8), sticky="w")
+        ent_role.configure(state="disabled")
 
-        def _clear_staff():
-            sel_staff.update({"db_id": None, "staff_id_opt": "", "name": "", "position": "", "phone": ""})
-            try:
-                e_staff_id.grid_forget()
-                e_staff_name.grid_forget()
-                e_staff_role.grid_forget()
-            except Exception:
-                pass
-            try:
-                # Show choose button again
-                btn_choose.grid(row=0, column=1, sticky="w", padx=(0,6))
-            except Exception:
-                pass
+        # All Staff checkbox placed near ID area
+        all_chk = ctk.CTkCheckBox(frm, text="All Staff", variable=all_staff_var, width=120)
 
-        clear_btn.configure(command=_clear_staff)
-
-        # When All Staff toggled, show/hide choose button and readonly fields accordingly
-        def _on_all_staff_toggle(*_a):
-            is_all = bool(all_staff_var.get())
-            if is_all:
-                # clear any chosen staff, hide chosen widgets, make sure choose button hidden
-                _clear_staff()
-                try:
-                    btn_choose.grid_forget()
-                except Exception:
-                    pass
-                # show a label "All Staff"
-                lbl = ctk.CTkLabel(filt, text="All Staff (aggregated)", text_color="#555555")
-                lbl.grid(row=0, column=1, sticky="w", padx=(0,6))
-                filt._all_label = lbl  # stash reference so we can remove later
+        def _on_all_toggle(*_a):
+            if all_staff_var.get():
+                # Clear selection and show aggregated text
+                selected.update({"db_id": None, "staff_id_opt": None, "name": "All Staff (aggregated)", "role": ""})
+                # hide choose button and show aggregated label
+                for w in sid_holder.winfo_children():
+                    w.destroy()
+                lbl_selected_id.configure(text="All Staff (aggregated)")
+                lbl_selected_id.pack(side="left", padx=(6,0))
+                ent_name.configure(state="normal"); ent_name.delete(0, "end"); ent_name.insert(0, "All Staff (aggregated)"); ent_name.configure(state="disabled")
+                ent_role.configure(state="normal"); ent_role.delete(0, "end"); ent_role.insert(0, ""); ent_role.configure(state="disabled")
             else:
-                # remove "All Staff" label and show choose button
-                try:
-                    if hasattr(filt, "_all_label"):
-                        filt._all_label.destroy()
-                        del filt._all_label
-                except Exception:
-                    pass
-                try:
-                    btn_choose.grid(row=0, column=1, sticky="w", padx=(0,6))
-                except Exception:
-                    pass
+                # revert to choose button and blank fields
+                selected.update({"db_id": None, "staff_id_opt": None, "name": None, "role": None})
+                for w in sid_holder.winfo_children():
+                    w.destroy()
+                render_choose_button()
+                ent_name.configure(state="normal"); ent_name.delete(0, "end"); ent_name.configure(state="disabled")
+                ent_role.configure(state="normal"); ent_role.delete(0, "end"); ent_role.configure(state="disabled")
 
-        try:
-            all_staff_var.trace_add("write", lambda *_: _on_all_staff_toggle())
-        except Exception:
-            try:
-                all_staff_var.trace("w", lambda *_: _on_all_staff_toggle())
-            except Exception:
-                pass
+        # Position the checkbox (right of the id holder)
+        all_chk.grid(row=0, column=6, padx=(6,8), sticky="w")
+        all_chk.configure(command=_on_all_toggle)
 
-        # -- Results area with Total Commission display --
-        body = ctk.CTkFrame(top)
-        body.pack(fill="both", expand=True, padx=10, pady=(6,10))
-        body.grid_rowconfigure(0, weight=1)
-        body.grid_columnconfigure(0, weight=1)
+        # initialize choose button
+        render_choose_button()
 
-        # Tree columns: Bill Date, Bill No, Bill Amount, Commission Amount
-        cols = ("id", "bill_date", "bill_no", "bill_amount", "commission_amount")
-        tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
+        # Row 1: Date filters
+        ctk.CTkLabel(frm, text="Date From (DD-MM-YYYY):").grid(row=1, column=0, padx=(6,6), sticky="w")
+        e_from = ctk.CTkEntry(frm, width=160)
+        e_from.grid(row=1, column=1, padx=(0,8), sticky="w")
+
+        ctk.CTkLabel(frm, text="Date To (DD-MM-YYYY):").grid(row=1, column=2, padx=(6,6), sticky="w")
+        e_to = ctk.CTkEntry(frm, width=200)
+        e_to.grid(row=1, column=3, padx=(0,8), sticky="w")
+        e_to.delete(0, "end")
+        e_to.insert(0, _to_ui_date(datetime.now()))
+
+        # Buttons: Generate and Reset
+        btn_generate = white_btn(frm, text="Generate", width=120)
+        btn_generate.grid(row=1, column=5, padx=(6,6), sticky="e")
+
+        btn_reset = white_btn(frm, text="Reset", width=120)
+        btn_reset.grid(row=1, column=6, padx=(6,6), sticky="e")
+
+        # Show Details checkbox (small)
+        show_details_var = tk.BooleanVar(value=False)
+        cb_show_details = ctk.CTkCheckBox(frm, text="Show Details", variable=show_details_var)
+        cb_show_details.grid(row=0, column=7, padx=(12,8), sticky="e")
+
+        # ---------- Table area ----------
+        table_wrap = ctk.CTkFrame(top)
+        table_wrap.pack(fill="both", expand=True, padx=8, pady=(6, 6))
+
+        cols = ("bill_date", "bill_no", "bill_amount", "commission_amount")
+        tree = ttk.Treeview(table_wrap, columns=cols, show="headings", selectmode="browse")
         headings = [
-            ("id", "CID", 60),  # internal commission id (hidden width or small)
-            ("bill_date", "Bill Date", 120),
-            ("bill_no", "Bill No.", 360),
-            ("bill_amount", "Bill Amount (RM)", 140),
-            ("commission_amount", "Commission Amount (RM)", 140),
+            ("bill_date", "Bill Date", 140),
+            ("bill_no", "Bill No.", 220),     # slightly shorter
+            ("bill_amount", "Bill Amount (RM)", 180),  # lengthened
+            ("commission_amount", "Commission Amount (RM)", 200),  # lengthened
         ]
         for key, title, w in headings:
             tree.heading(key, text=title)
             tree.column(key, width=w, anchor="w", stretch=False)
-        tree.grid(row=0, column=0, sticky="nsew", padx=(0,6), pady=6)
+        tree.pack(fill="both", expand=True, side="left", padx=(0,6), pady=6)
 
-        vsb = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
-        vsb.grid(row=0, column=1, sticky="ns")
+        vsb = ttk.Scrollbar(table_wrap, orient="vertical", command=tree.yview)
+        vsb.pack(side="left", fill="y")
         tree.configure(yscrollcommand=vsb.set)
 
-        # Right-side summary box for Total Commission
-        right_box = ctk.CTkFrame(body, width=240)
-        right_box.grid(row=0, column=2, sticky="ne", padx=(6,0), pady=6)
-        right_box.grid_propagate(False)
-        ctk.CTkLabel(right_box, text="Total Commission", anchor="center").pack(fill="x", pady=(12,6))
-        total_var = tk.StringVar(value="0.00")
-        lbl_total = ctk.CTkLabel(right_box, textvariable=total_var, font=(FONT_FAMILY, 20), anchor="center")
-        lbl_total.pack(fill="x", pady=(6,12))
+        # Bottom area: total commission display (right aligned)
+        bottom = ctk.CTkFrame(top)
+        bottom.pack(fill="x", padx=8, pady=(0, 12))
+        total_lbl = ctk.CTkLabel(bottom, text="Total Commission (RM):", anchor="e")
+        total_val = ctk.CTkEntry(bottom, width=200)
+        total_val.configure(state="disabled")
+        # place them to the right
+        total_lbl.pack(side="right", padx=(6,4))
+        total_val.pack(side="right", padx=(0,16))
 
-        # Detail frame (initially hidden) to show linked vouchers for the selected commission
-        detail_frame = ctk.CTkFrame(top)
-        detail_visible = {"v": False}
-        # Don't pack yet; we will pack when needed.
+        # ---------- Helpers for staff chooser and UI updates ----------
+        def open_staff_chooser():
+            """Open a small staff picker (double-click selects)."""
+            pick = ctk.CTkToplevel(top)
+            pick.title("Choose Staff")
+            pick.geometry("720x420")
+            pick.grab_set()
+            wrap = ctk.CTkFrame(pick)
+            wrap.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # Detail tree
-        dcols = ("voucher_id", "created_at", "customer_name", "contact_number", "amount_rm", "tech_commission", "status")
-        dtree = ttk.Treeview(detail_frame, columns=dcols, show="headings", selectmode="browse")
-        dheadings = [
-            ("voucher_id", "Voucher ID", 120),
-            ("created_at", "Created", 140),
-            ("customer_name", "Customer", 260),
-            ("contact_number", "Contact", 140),
-            ("amount_rm", "Amount (RM)", 110),
-            ("tech_commission", "Tech Commission", 140),
-            ("status", "Status", 110),
-        ]
-        for key, title, w in dheadings:
-            dtree.heading(key, text=title)
-            dtree.column(key, width=w, anchor="w", stretch=False)
-        dvsb = ttk.Scrollbar(detail_frame, orient="vertical", command=dtree.yview)
-        dtree.configure(yscrollcommand=dvsb.set)
-        dtree.grid(row=0, column=0, sticky="nsew", padx=(10,6), pady=(6,10))
-        dvsb.grid(row=0, column=1, sticky="ns", pady=(6,10))
-        # small label at top of detail frame
-        lbl_detail_title = ctk.CTkLabel(detail_frame, text="Linked Vouchers (for selected commission)", anchor="w")
-        lbl_detail_title.grid(row=0, column=0, columnspan=2, sticky="nw", padx=(10,6), pady=(6,0))
+            cols_local = ("staff_id_opt", "name", "position", "phone")
+            t = ttk.Treeview(wrap, columns=cols_local, show="headings", selectmode="browse")
+            widths = [140, 300, 140, 140]
+            headers = [("staff_id_opt","Staff ID",widths[0]), ("name","Name",widths[1]), ("position","Position",widths[2]), ("phone","Phone",widths[3])]
+            for k, title, w_ in headers:
+                t.heading(k, text=title); t.column(k, width=w_, anchor="w", stretch=False)
+            t.pack(fill="both", expand=True, side="left", padx=(0,6), pady=6)
+            vs = ttk.Scrollbar(wrap, orient="vertical", command=t.yview); vs.pack(side="left", fill="y"); t.configure(yscrollcommand=vs.set)
 
-        # Helper to format created_at -> DD-MM-YYYY
-        def _format_bill_date(created_at):
-            if not created_at:
-                return ""
+            # load rows
             try:
-                dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-                return dt.strftime("%d-%m-%Y")
-            except Exception:
-                return (created_at or "")[:10]
-
-        # Query function: commissions
-        def _query_commissions_for_staff(db_id, iso_from, iso_to):
-            rows = []
-            total_comm = 0.0
-            try:
-                conn = get_conn()
-                cur = conn.cursor()
-                q = "SELECT id, created_at, bill_no, total_amount, commission_amount, voucher_id FROM commissions WHERE 1=1"
-                params = []
-                if db_id is not None:
-                    q += " AND staff_id = ?"
-                    params.append(db_id)
-                if iso_from:
-                    q += " AND DATE(created_at) >= DATE(?)"
-                    params.append(iso_from)
-                if iso_to:
-                    q += " AND DATE(created_at) <= DATE(?)"
-                    params.append(iso_to)
-                q += " ORDER BY DATE(created_at) ASC, id ASC"
-                cur.execute(q, params)
-                fetched = cur.fetchall()
+                conn = get_conn(); cur = conn.cursor()
+                cur.execute("SELECT staff_id_opt, name, position, phone, id FROM staffs ORDER BY name COLLATE NOCASE")
+                rows = cur.fetchall()
                 conn.close()
-                for (cid, created_at, bill_no, total_amount, commission_amount, voucher_id) in fetched:
-                    amt = float(total_amount) if (total_amount not in (None, "")) else 0.0
-                    comm = float(commission_amount) if (commission_amount not in (None, "")) else 0.0
-                    rows.append((cid, created_at, bill_no or "", amt, comm, voucher_id))
-                    total_comm += comm
             except Exception:
-                logger.exception("Failed querying commissions for report")
-                raise
-            return rows, total_comm
+                rows = []
+            for r in rows:
+                # r: (staff_id_opt, name, position, phone, id)
+                sid = r[0] or ""
+                nm = r[1] or ""
+                pos = r[2] or ""
+                phone = r[3] or ""
+                dbid = r[4] if len(r) > 4 else None
+                t.insert("", "end", iid=str(dbid), values=(sid, nm, pos, phone))
 
-        # Query vouchers linked to a commission (via voucher_id or ref_bill == bill_no)
-        def _query_vouchers_for_commission(bill_no, commission_voucher_id):
-            rows = []
-            try:
-                conn = get_conn()
-                cur = conn.cursor()
-                # Search by voucher_id if provided, and by ref_bill (case-insensitive)
-                q = """
-                    SELECT voucher_id, created_at, customer_name, contact_number, amount_rm, tech_commission, status, pdf_path
-                    FROM vouchers
-                    WHERE 1=1
-                """
-                params = []
-                conds = []
-                if commission_voucher_id:
-                    conds.append("voucher_id = ?")
-                    params.append(str(commission_voucher_id))
-                if bill_no:
-                    conds.append("LOWER(ref_bill) = LOWER(?)")
-                    params.append(bill_no)
-                if conds:
-                    q += " AND (" + " OR ".join(conds) + ")"
-                else:
-                    # no conditions -> return empty
-                    conn.close()
-                    return []
-                q += " ORDER BY DATE(created_at) DESC"
-                cur.execute(q, params)
-                fetched = cur.fetchall()
-                conn.close()
-                for (vid, created_at, cname, contact, amt, comm, status, pdf) in fetched:
-                    rows.append((vid or "", created_at or "", cname or "", contact or "", amt if amt is not None else None, comm if comm is not None else None, status or "", pdf or ""))
-            except Exception:
-                logger.exception("Failed querying vouchers for commission")
-            return rows
+            def _pick(evt=None):
+                sel = t.selection()
+                if not sel:
+                    messagebox.showinfo("Choose", "Select a staff first.", parent=pick)
+                    return
+                iid = sel[0]
+                vals = t.item(iid)["values"]
+                sid_opt = vals[0] or ""
+                nm = vals[1] or ""
+                pos = vals[2] or ""
+                # set selected state
+                selected["db_id"] = int(iid) if iid and iid.isdigit() else None
+                selected["staff_id_opt"] = sid_opt
+                selected["name"] = nm
+                selected["role"] = pos
+                # Update UI: hide choose button, show selected id label and readonly fields
+                for w in sid_holder.winfo_children():
+                    w.destroy()
+                lbl_selected_id.configure(text=str(sid_opt or selected["db_id"] or ""))
+                lbl_selected_id.pack(side="left", padx=(6,0))
+                ent_name.configure(state="normal"); ent_name.delete(0, "end"); ent_name.insert(0, nm); ent_name.configure(state="disabled")
+                ent_role.configure(state="normal"); ent_role.delete(0, "end"); ent_role.insert(0, pos); ent_role.configure(state="disabled")
+                # ensure All Staff unchecked
+                all_staff_var.set(False)
+                try:
+                    pick.destroy()
+                except Exception:
+                    pass
 
-        # Generate action
-        def _parse_dates_to_iso():
-            df = (e_from.get() or "").strip()
-            dt = (e_to.get() or "").strip()
-            iso_from = _parse_ui_date_to_iso(df) if df else ""
-            iso_to = _parse_ui_date_to_iso(dt) if dt else ""
-            return iso_from, iso_to
+            t.bind("<Double-1>", _pick)
+            # Buttons
+            btnf = ctk.CTkFrame(pick); btnf.pack(fill="x", padx=8, pady=(6,8))
+            white_btn(btnf, text="Select", width=120, command=_pick).pack(side="right", padx=(6,0))
+            white_btn(btnf, text="Close", width=120, command=pick.destroy).pack(side="right", padx=(0,6))
 
-        def _generate_report():
-            is_all = bool(all_staff_var.get())
-            dbid = None if is_all else sel_staff.get("db_id")
-            if (not is_all) and dbid is None:
-                messagebox.showerror("Missing", "Choose a staff first or enable 'All Staff'.", parent=top)
-                return
-            iso_from, iso_to = _parse_dates_to_iso()
-            try:
-                rows, total_comm = _query_commissions_for_staff(dbid, iso_from, iso_to)
-            except Exception as e:
-                messagebox.showerror("Query Error", f"Failed to fetch report:\n{e}", parent=top)
-                return
-            # populate table
+        def reset_filters():
+            # Reset visual state and filters
+            all_staff_var.set(False)
+            _on_all_toggle()
+            e_from.delete(0, "end")
+            e_to.delete(0, "end"); e_to.insert(0, _to_ui_date(datetime.now()))
+            # clear table & totals
             tree.delete(*tree.get_children())
-            for (cid, created_at, bill_no, amt, comm, voucher_id) in rows:
-                tree.insert("", "end", iid=str(cid), values=(
-                    cid,
-                    _format_bill_date(created_at),
-                    bill_no,
-                    f"{amt:.2f}",
-                    f"{comm:.2f}",
-                ))
-            total_var.set(f"{total_comm:.2f}")
-            # hide detail panel until user chooses to show or selects row
-            if detail_visible["v"]:
-                _hide_detail()
+            total_val.configure(state="normal"); total_val.delete(0, "end"); total_val.configure(state="disabled")
 
-        gen_btn.configure(command=_generate_report)
+        btn_reset.configure(command=reset_filters)
 
-        # Selection handler to populate details if toggle is on
-        def _on_commission_select(event=None):
+        # ---------- Data loading and mapping ----------
+        def _parse_ui_date_safe(s):
+            s = (s or "").strip()
+            if not s:
+                return ""
+            iso = _parse_ui_date_to_iso(s)
+            return iso
+
+        def load_commissions():
+            # Build query depending on selected staff / all-staff and dates
+            date_from_iso = _parse_ui_date_safe(e_from.get().strip())
+            date_to_iso = _parse_ui_date_safe(e_to.get().strip())
+
+            params = []
+            where_clauses = []
+            # staff filtering
+            if not all_staff_var.get():
+                # require a selected staff
+                if not selected.get("db_id") and not selected.get("staff_id_opt"):
+                    messagebox.showerror("Missing", 'Choose a staff first or enable "All Staff".')
+                    return False
+                # prefer staff.db id if available
+                if selected.get("db_id"):
+                    where_clauses.append("c.staff_id = ?")
+                    params.append(selected["db_id"])
+                elif selected.get("staff_id_opt"):
+                    where_clauses.append("s.staff_id_opt = ?")
+                    params.append(selected["staff_id_opt"])
+            # date filters (created_at of commissions)
+            if date_from_iso:
+                where_clauses.append("DATE(c.created_at) >= DATE(?)"); params.append(date_from_iso)
+            if date_to_iso:
+                where_clauses.append("DATE(c.created_at) <= DATE(?)"); params.append(date_to_iso)
+
+            where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            sql = f"""
+                SELECT c.id, c.bill_type, c.bill_no, c.total_amount, c.commission_amount, c.created_at, c.voucher_id, s.staff_id_opt, s.name
+                FROM commissions c
+                LEFT JOIN staffs s ON c.staff_id = s.id
+                {where_sql}
+                ORDER BY c.created_at DESC
+            """
             try:
-                if not show_details_var.get():
-                    return
-                sel = tree.selection()
-                if not sel:
-                    return
-                cid = sel[0]
-                # fetch commission row to get bill_no and voucher_id
+                conn = get_conn(); cur = conn.cursor()
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                conn.close()
+            except Exception as e:
+                logger.exception("Failed loading commissions for report", exc_info=e)
+                rows = []
+
+            # populate tree and compute total
+            tree.delete(*tree.get_children())
+            total = 0.0
+            for row in rows:
+                # row: (id, bill_type, bill_no, total_amount, commission_amount, created_at, voucher_id, staff_id_opt, name)
+                cid = row[0]
+                bt = (row[1] or "").upper()
+                bno = row[2] or ""
+                amt = row[3] if row[3] is not None else ""
+                comm = row[4] if row[4] is not None else 0.0
+                created_at = row[5] or ""
+                # format date (dd-mm-yyyy)
                 try:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("SELECT bill_no, voucher_id FROM commissions WHERE id=?", (cid,))
-                    crow = cur.fetchone()
-                    conn.close()
+                    dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                    bill_date = dt.strftime("%d-%m-%Y")
                 except Exception:
-                    crow = None
-                bill_no = crow[0] if crow and len(crow) > 0 else ""
-                comm_vid = crow[1] if crow and len(crow) > 1 else None
-                vouchers = _query_vouchers_for_commission(bill_no, comm_vid)
-                # populate detail tree
-                dtree.delete(*dtree.get_children())
-                for (vid, created_at, cname, contact, amt, commamt, status, pdfpath) in vouchers:
-                    dtree.insert("", "end", values=(vid, created_at, cname, contact, f"{(amt or 0):.2f}" if amt is not None else "", f"{(commamt or 0):.2f}" if commamt is not None else "", status))
-                if vouchers and not detail_visible["v"]:
-                    _show_detail()
-                elif not vouchers and detail_visible["v"]:
-                    # if nothing found, hide details
-                    _hide_detail()
-            except Exception:
-                logger.exception("Failed in commission select handler", exc_info=True)
+                    bill_date = (created_at or "")[:10]
+                # display amounts with 2 decimal
+                try:
+                    amt_display = f"{float(amt):.2f}" if amt != "" else ""
+                except Exception:
+                    amt_display = str(amt)
+                try:
+                    comm_val = float(comm) if comm not in (None, "") else 0.0
+                except Exception:
+                    comm_val = 0.0
+                comm_display = f"{comm_val:.2f}"
+                total += comm_val
 
-        tree.bind("<<TreeviewSelect>>", _on_commission_select)
+                tree.insert("", "end", iid=str(cid), values=(bill_date, bno, amt_display, comm_display))
 
-        # Show/hide detail frame
-        def _show_detail():
-            if detail_visible["v"]:
+            # update total display
+            total_val.configure(state="normal"); total_val.delete(0, "end"); total_val.insert(0, f"{total:.2f}"); total_val.configure(state="disabled")
+            return True
+
+        def on_generate():
+            ok = load_commissions()
+            if ok:
+                # scroll to top
+                try:
+                    if tree.get_children():
+                        first = tree.get_children()[0]
+                        tree.see(first)
+                except Exception:
+                    pass
+
+        btn_generate.configure(command=on_generate)
+
+        # ---------- Double-click details handler ----------
+        def _show_voucher_details_for_commission(event=None):
+            sel = tree.selection()
+            if not sel:
                 return
+            cid = sel[0]
+            # We need to look up the commission row to find voucher_id or bill_no
             try:
-                detail_frame.pack(fill="both", expand=False, padx=10, pady=(0,10))
-                detail_visible["v"] = True
-                top.geometry("1100x900")
+                conn = get_conn(); cur = conn.cursor()
+                cur.execute("SELECT id, voucher_id, bill_no FROM commissions WHERE id=?", (cid,))
+                crow = cur.fetchone()
+                conn.close()
             except Exception:
-                logger.exception("Failed to show detail frame", exc_info=True)
-
-        def _hide_detail():
-            if not detail_visible["v"]:
+                crow = None
+            if not crow:
+                messagebox.showinfo("Details", "No commission info found.")
                 return
+            _, voucher_id, bill_no = crow
+            # Build voucher query
+            q_params = []
+            q_where = []
+            if voucher_id:
+                q_where.append("voucher_id = ?"); q_params.append(voucher_id)
+            if bill_no:
+                q_where.append("LOWER(ref_bill) = LOWER(?)"); q_params.append(bill_no)
+            if not q_where:
+                messagebox.showinfo("Details", "No linked vouchers found for this commission.")
+                return
+            qsql = f"SELECT voucher_id, created_at, customer_name, contact_number, amount_rm, tech_commission, status FROM vouchers WHERE {' OR '.join(q_where)} ORDER BY created_at DESC"
             try:
-                detail_frame.pack_forget()
-                detail_visible["v"] = False
-                top.geometry("1100x720")
-            except Exception:
-                logger.exception("Failed to hide detail frame", exc_info=True)
+                conn = get_conn(); cur = conn.cursor()
+                cur.execute(qsql, q_params)
+                vrows = cur.fetchall()
+                conn.close()
+            except Exception as e:
+                logger.exception("Failed loading vouchers for commission", exc_info=e)
+                vrows = []
 
-        # Toggle detail display when checkbox changes
-        def _on_details_toggle(*_a):
-            if show_details_var.get():
-                # attempt to show details for current selection
-                _on_commission_select()
-            else:
-                _hide_detail()
+            if not vrows:
+                messagebox.showinfo("Details", "No linked vouchers found for this commission.")
+                return
 
+            det = ctk.CTkToplevel(top)
+            det.title(f"Voucher(s) for Commission {cid}")
+            det.geometry("980x420")
+            det.grab_set()
+
+            wrap = ctk.CTkFrame(det); wrap.pack(fill="both", expand=True, padx=8, pady=8)
+            cols_v = ("voucher_id","created_at","customer_name","contact_number","amount_rm","tech_commission","status")
+            tv = ttk.Treeview(wrap, columns=cols_v, show="headings")
+            widths_v = [100,140,220,120,110,120,100]
+            for k,w_ in zip(cols_v, widths_v):
+                tv.heading(k, text=k.replace("_"," ").title()); tv.column(k, width=w_, anchor="w", stretch=False)
+            tv.pack(fill="both", expand=True, side="left", padx=(0,6))
+            vs = ttk.Scrollbar(wrap, orient="vertical", command=tv.yview); vs.pack(side="left", fill="y"); tv.configure(yscrollcommand=vs.set)
+
+            for vr in vrows:
+                vid, created_at, cname, contact, amt, comm_amt, status = vr
+                try:
+                    dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                    created_f = dt.strftime("%d-%m-%Y")
+                except Exception:
+                    created_f = (created_at or "")[:10]
+                tv.insert("", "end", values=(vid, created_f, cname or "", contact or "", f"{amt or ''}", f"{comm_amt or ''}", status or ""))
+
+            btns = ctk.CTkFrame(det); btns.pack(fill="x", padx=8, pady=(6,8))
+            white_btn(btns, text="Close", width=120, command=det.destroy).pack(side="right", padx=(6,0))
+
+        # Only show details dialog when Show Details is ticked
+        def _maybe_show_details(event=None):
+            if not show_details_var.get():
+                return
+            _show_voucher_details_for_commission(event)
+
+        # bind double-click
         try:
-            show_details_var.trace_add("write", lambda *_: _on_details_toggle())
+            tree.bind("<Double-1>", _maybe_show_details)
         except Exception:
-            try:
-                show_details_var.trace("w", lambda *_: _on_details_toggle())
-            except Exception:
-                pass
+            pass
 
-        # Double-click on a voucher detail row to open PDF (if exists)
-        def _open_voucher_pdf_from_row(event=None):
-            try:
-                sel = dtree.selection()
-                if not sel:
-                    return
-                vals = dtree.item(sel[0])["values"]
-                if not vals:
-                    return
-                vid = vals[0]
-                if not vid:
-                    messagebox.showerror("Open PDF", "Voucher ID missing.", parent=top)
-                    return
-                # find pdf_path for this voucher
-                try:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("SELECT pdf_path FROM vouchers WHERE voucher_id=?", (str(vid),))
-                    row = cur.fetchone()
-                    conn.close()
-                except Exception:
-                    row = None
-                pdf_path = row[0] if row and row[0] else None
-                if not pdf_path or not os.path.exists(pdf_path):
-                    messagebox.showerror("Open PDF", "PDF not found for this voucher.", parent=top)
-                    return
-                try:
-                    webbrowser.open_new(os.path.abspath(pdf_path))
-                except Exception:
-                    if os.name == "nt":
-                        os.startfile(pdf_path)  # type: ignore
-                    else:
-                        os.system(f"open '{pdf_path}'" if sys.platform == "darwin" else f"xdg-open '{pdf_path}'")
-            except Exception:
-                logger.exception("Failed to open voucher PDF", exc_info=True)
-
-        dtree.bind("<Double-1>", _open_voucher_pdf_from_row)
-
-        # Clear details when no selection or when Generate clears
-        def _clear_details():
-            try:
-                dtree.delete(*dtree.get_children())
-            except Exception:
-                pass
-
-        # Remove CSV export (user requested removal) — there is no export button now.
-        # Bottom spacer / controls
-        bottom_frame = ctk.CTkFrame(top)
-        bottom_frame.pack(fill="x", padx=10, pady=(4,10))
-        # place a small instruction label on left
-        ctk.CTkLabel(bottom_frame, text="Tip: enable 'Show Details' and select a commission row to see linked vouchers.").pack(side="left", padx=(4,0))
+        # initial state: clear table
+        reset_filters()
 
         try:
             top.update_idletasks()
         except Exception:
             pass
+
 
     # ---------- Commission UI (with preview + per-staff storage) ----------
     def add_commission(self):
