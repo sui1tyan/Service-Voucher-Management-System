@@ -12,7 +12,6 @@ else:
 LOG_DIR = os.path.join(APP_DIR, "logs")
 DB_FILE = os.path.join(APP_DIR, "vouchers.db")
 PDF_DIR = os.path.join(APP_DIR, "pdfs")
-IMAGES_DIR = os.path.join(APP_DIR, "images")
 STAFFS_ROOT = os.path.join(APP_DIR, "staffs")
 
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -34,6 +33,7 @@ if not logger.handlers:
 SHOP_NAME = "TONY.COM"
 SHOP_ADDR = "TB4318, Lot 5, Block 31, Fajar Complex  91000 Tawau Sabah, Malaysia"
 SHOP_TEL = "Tel : 089-763778, H/P: 0168260533"
+# If you have a logo.jpg in the same folder, set this to os.path.join(APP_DIR, "logo.jpg")
 LOGO_PATH = "" 
 DEFAULT_BASE_VID = 41000
 FONT_FAMILY = "Segoe UI"
