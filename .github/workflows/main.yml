@@ -27,13 +27,6 @@ jobs:
         # Note: PyInstaller automatically finds imported modules (database.py, gui.py, etc.)
         # starting from main.py.
         run: |
-          # Check if logo exists, otherwise skip adding it to avoid errors
-          if (Test-Path "logo.jpg") {
-            $add_data = "--add-data 'logo.jpg;.'"
-          } else {
-            $add_data = ""
-          }
-
           # Invoke PyInstaller
           # We explicitly exclude heavy libs that might be pulled in by accident
           pyinstaller --clean --onedir --noconsole main.py --name ServiceVoucherApp `
