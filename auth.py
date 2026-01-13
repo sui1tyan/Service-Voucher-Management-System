@@ -6,6 +6,8 @@ def hash_pwd(pwd: str) -> bytes:
 
 def verify_pwd(pwd: str, hp: bytes) -> bool:
     try:
+        if isinstance(hp, str):
+            hp = hp.encode("utf-8")
         return bcrypt.checkpw(pwd.encode("utf-8"), hp)
     except Exception:
         return False
