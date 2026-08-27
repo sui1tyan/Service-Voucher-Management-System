@@ -1,12 +1,43 @@
-name: Build Service Voucher Management System (Windows)
+name: SVMS Tests and Windows Build
 
 on:
   push:
-    branches: [ main ]
+    branches: ["main", "codex/**"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  test:
+    name: Test on Python 3.11
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Compile Python files
+        run: python -m compileall -q .
+
+      - name: Run tests
+        run: python -m pytest -q
+
   build-windows:
+    name: Build Windows application
+    needs: test
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -16,35 +47,38 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-          pip install pyinstaller
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
 
-      - name: Build (PyInstaller, --onedir)
-        # Note: PyInstaller automatically finds imported modules (database.py, gui.py, etc.)
-        # starting from main.py.
+      - name: Build ONEDIR application
+        shell: pwsh
         run: |
-          # Invoke PyInstaller
-          # We explicitly exclude heavy libs that might be pulled in by accident
-          pyinstaller --clean --onedir --noconsole main.py --name ServiceVoucherApp `
-            $add_data `
-            --exclude-module pandas `
-            --exclude-module openpyxl `
-            --exclude-module PIL._avif `
+          pyinstaller --clean --onedir --noconsole main.py `
+            --name ServiceVoucherApp `
+            --add-data "logo.jpg;." `
+            --collect-all customtkinter `
             --hidden-import=bcrypt `
             --hidden-import=_cffi_backend `
+            --exclude-module pandas `
+            --exclude-module openpyxl `
             --noupx
 
       - name: Create ZIP artifact
+        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path "dist/ServiceVoucherApp" -DestinationPath "dist/ServiceVoucherApp_onedir.zip" -Force
+          Compress-Archive `
+            -Path "dist/ServiceVoucherApp" `
+            -DestinationPath "dist/ServiceVoucherApp_onedir.zip" `
+            -Force
 
       - name: Upload ONEDIR artifact
         uses: actions/upload-artifact@v4
         with:
           name: ServiceVoucherApp-onedir
           path: dist/ServiceVoucherApp_onedir.zip
+          if-no-files-found: error
+          retention-days: 30

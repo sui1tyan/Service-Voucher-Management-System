@@ -1,14 +1,21 @@
-import sys
+"""SVMS application entry point."""
+
+from tkinter import messagebox
+
+from config import APP_NAME, logger
 from database import init_db
 from gui import VoucherApp
-from config import logger
 
-if __name__ == "__main__":
+def main() -> None:
     try:
         init_db()
         app = VoucherApp()
-        app.mainloop()
-    except Exception as e:
-        logger.exception("App crashed")
-        import tkinter.messagebox
-        tkinter.messagebox.showerror("Crash", str(e))
+        if app.ready:
+            app.mainloop()
+    except Exception as exc:
+        logger.exception("Application crashed")
+        messagebox.showerror(APP_NAME, f"The application could not continue:\n\n{exc}")
+
+
+if __name__ == "__main__":
+    main()
