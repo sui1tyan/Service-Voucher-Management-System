@@ -595,8 +595,12 @@ def get_voucher(voucher_id: str) -> dict[str, Any] | None:
 
 
 def search_vouchers(
-    filters: Mapping[str, Any] | None = None, *, limit: int = 500
+    filters: Mapping[str, Any] | None = None,
+    *,
+    limit: int = 100,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
+    
     filters = filters or {}
     sql = "SELECT * FROM vouchers WHERE 1=1"
     params: list[Any] = []
@@ -629,12 +633,58 @@ def search_vouchers(
         sql += " AND DATE(created_at) <= DATE(?)"
         params.append(date_to)
 
-    sql += " ORDER BY datetime(created_at) DESC, id DESC LIMIT ?"
-    params.append(max(1, min(int(limit), 5_000)))
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    params.extend((limit, offset))
     with db_session() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [dict(row) for row in rows]
 
+def count_vouchers(
+    filters: Mapping[str, Any] | None = None
+) -> int:
+    filters = filters or {}
+    sql = "SELECT COUNT(*) FROM vouchers WHERE 1=1"
+    params: list[Any] = []
+
+    voucher_id = str(filters.get("voucher_id") or "").strip()
+    if voucher_id:
+        sql += " AND voucher_id LIKE ?"
+        params.append(f"%{voucher_id}%")
+
+    customer_name = str(filters.get("customer_name") or "").strip()
+    if customer_name:
+        sql += " AND customer_name LIKE ? COLLATE NOCASE"
+        params.append(f"%{customer_name}%")
+
+    contact_number = str(filters.get("contact_number") or "").strip()
+    if contact_number:
+        sql += " AND contact_number LIKE ?"
+        params.append(f"%{contact_number}%")
+
+    recipient = str(filters.get("recipient") or "").strip()
+    if recipient:
+        sql += " AND recipient LIKE ? COLLATE NOCASE"
+        params.append(f"%{recipient}%")
+
+    status = str(filters.get("status") or "").strip()
+    if status and status != "All":
+        sql += " AND status = ?"
+        params.append(status)
+
+    date_from = str(filters.get("date_from") or "").strip()
+    if date_from:
+        sql += " AND DATE(created_at) >= DATE(?)"
+        params.append(date_from)
+
+    date_to = str(filters.get("date_to") or "").strip()
+    if date_to:
+        sql += " AND DATE(created_at) <= DATE(?)"
+        params.append(date_to)
+
+    with db_session() as conn:
+        row = conn.execute(sql, params).fetchone()
+
+    return int(row[0]) if row else 0
 
 def update_voucher(
     voucher_id: str, data: Mapping[str, Any], actor: str
