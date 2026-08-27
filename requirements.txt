@@ -1,5 +1,5 @@
-customtkinter
-reportlab
-bcrypt
-pillow
-cffi
+customtkinter>=5.2.2
+reportlab>=4.2
+bcrypt>=4.2
+Pillow>=10.4
+cffi>=1.17

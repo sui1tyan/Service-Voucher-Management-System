@@ -1,0 +1,31 @@
+# Customer and operational data (never commit)
+vouchers.db
+vouchers.db-*
+*.db-wal
+*.db-shm
+pdfs/
+staffs/
+logs/
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Packaging
+build/
+dist/
+*.spec
+*.zip
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
