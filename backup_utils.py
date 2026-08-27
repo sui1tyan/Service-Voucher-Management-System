@@ -83,7 +83,7 @@ def _safe_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
 
 def _check_database(db_path: Path) -> None:
     try:
-        with sqlite3.connect(db_path) as conn:
+        with closing(sqlite3.connect(db_path)) as conn:
             integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
             if integrity != "ok":
                 raise ValueError(f"Backup database failed integrity check: {integrity}")

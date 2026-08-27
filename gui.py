@@ -99,13 +99,36 @@ class Modal(ctk.CTkToplevel):
 
     def __init__(self, master: Any, title: str, geometry: str) -> None:
         super().__init__(master)
+
         self.title(title)
         self.geometry(geometry)
         self.minsize(420, 240)
-        self.transient(master)
+
+        # Only make the dialog transient when its parent is actually visible.
+        # Authentication dialogs are opened while the main application window
+        # is withdrawn, so making them transient to that hidden window can
+        # cause them to remain invisible on Windows.
+        try:
+            if master is not None and master.winfo_viewable():
+                self.transient(master)
+        except Exception:
+            pass
+
         self.grab_set()
         self.result: Any = None
-        self.after(80, self.focus_force)
+
+        # Bring the dialog to the foreground after Tk has finished mapping it.
+        self.after(100, self._bring_to_front)
+
+    def _bring_to_front(self) -> None:
+        try:
+            if not self.winfo_exists():
+                return
+
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
 
 
 class FirstRunAdminDialog(Modal):
@@ -1007,13 +1030,33 @@ class VoucherApp(ctk.CTk):
         self._build_table()
         self._build_actions()
         self.perform_search()
+
         self.ready = True
+
+        # Show the completed main window only after mainloop starts.
+        self.after(0, self._show_main_window)
+
+    def _show_main_window(self) -> None:
+        """Make the completed main application window visible."""
+
+        try:
+            if not self.winfo_exists():
+                return
+
+            self.state("normal")
+            self.update_idletasks()
+            self.lift()
+            self.focus_force()
+
+        except Exception:
+            logger.exception("Failed to show main application window")
 
     def _first_run_setup(self) -> bool:
         self.withdraw()
+
         dialog = FirstRunAdminDialog(self)
         self.wait_window(dialog)
-        self.deiconify()
+
         return bool(dialog.result)
 
     def _login_flow(self) -> bool:
@@ -1029,7 +1072,6 @@ class VoucherApp(ctk.CTk):
             if not password_dialog.result:
                 return False
             self.user["must_change_pwd"] = 0
-        self.deiconify()
         self.title(
             f"{APP_NAME} — {self.user['username']} ({self.user['role']})"
         )
