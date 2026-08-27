@@ -18,7 +18,21 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
-DATA_DIR = Path(os.environ.get("SVMS_DATA_DIR", APP_DIR)).expanduser().resolve()
+
+# Store writable application data outside the installed application folder.
+# Source/development builds continue to use the project directory.
+if getattr(sys, "frozen", False):
+    default_data_dir = (
+        Path(os.environ.get("LOCALAPPDATA", Path.home()))
+        / "TONY.COM"
+        / "ServiceVoucherApp"
+    )
+else:
+    default_data_dir = APP_DIR
+
+DATA_DIR = Path(
+    os.environ.get("SVMS_DATA_DIR", default_data_dir)
+).expanduser().resolve()
 
 LOG_DIR = DATA_DIR / "logs"
 PDF_DIR = DATA_DIR / "pdfs"

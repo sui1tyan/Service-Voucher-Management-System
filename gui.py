@@ -49,6 +49,7 @@ from database import (
     list_users,
     reset_user_password,
     search_vouchers,
+    count_vouchers,
     set_base_voucher_id,
     update_commission,
     update_staff,
@@ -1016,6 +1017,10 @@ class VoucherApp(ctk.CTk):
         self.user: dict[str, Any] | None = None
         self.current_rows: list[dict[str, Any]] = []
         self.rows_by_id: dict[str, dict[str, Any]] = {}
+        self.page_size = 100
+        self.current_page = 1
+        self.total_records = 0
+        self.total_pages = 1
 
         if not has_admin_user() and not self._first_run_setup():
             self.destroy()
@@ -1028,6 +1033,7 @@ class VoucherApp(ctk.CTk):
         self._build_header()
         self._build_filters()
         self._build_table()
+        self._build_pagination()
         self._build_actions()
         self.perform_search()
 
@@ -1117,7 +1123,7 @@ class VoucherApp(ctk.CTk):
         )
         self.status_filter.set("All")
         self.status_filter.pack(side="left", padx=4)
-        ctk.CTkButton(filters, text="Search", width=90, command=self.perform_search).pack(
+        ctk.CTkButton(filters, text="Search", width=90, command=self.search_from_first_page).pack(
             side="left", padx=4
         )
         ctk.CTkButton(
@@ -1188,16 +1194,48 @@ class VoucherApp(ctk.CTk):
         return result
 
     def perform_search(self) -> None:
+        filters = self._filters()
+
         try:
-            self.current_rows = search_vouchers(self._filters())
+            self.total_records = count_vouchers(filters)
+
+            self.total_pages = max(
+                1,
+                (self.total_records + self.page_size - 1) // self.page_size,
+            )
+
+            # Prevent the page number from becoming invalid after
+            # deleting records or changing filters.
+            if self.current_page > self.total_pages:
+                self.current_page = self.total_pages
+
+            offset = (self.current_page - 1) * self.page_size
+
+            self.current_rows = search_vouchers(
+                filters,
+                limit=self.page_size,
+                offset=offset,
+            )
+
         except Exception as exc:
             logger.exception("Voucher search failed")
-            messagebox.showerror("Search", str(exc), parent=self)
+            messagebox.showerror(
+                "Search",
+                str(exc),
+                parent=self,
+            )
             return
-        self.rows_by_id = {str(row["voucher_id"]): row for row in self.current_rows}
+
+        self.rows_by_id = {
+            str(row["voucher_id"]): row
+            for row in self.current_rows
+        }
+
         self.tree.delete(*self.tree.get_children())
+
         for row in self.current_rows:
             voucher_id = str(row["voucher_id"])
+
             self.tree.insert(
                 "",
                 "end",
@@ -1215,10 +1253,36 @@ class VoucherApp(ctk.CTk):
                 ),
             )
 
+        self._update_pagination_controls()
+
+    def _update_pagination_controls(self) -> None:
+        self.page_label.configure(
+            text=f"Page {self.current_page} of {self.total_pages}"
+        )
+
+        self.record_label.configure(
+            text=f"{self.total_records:,} records"
+        )
+
+        if self.current_page <= 1:
+            self.prev_button.configure(state="disabled")
+        else:
+            self.prev_button.configure(state="normal")
+
+        if self.current_page >= self.total_pages:
+            self.next_button.configure(state="disabled")
+        else:
+            self.next_button.configure(state="normal")
+
+    def search_from_first_page(self) -> None:
+        self.current_page = 1
+        self.perform_search()
+
     def reset_filters(self) -> None:
         for entry in self.filter_entries.values():
             entry.delete(0, "end")
         self.status_filter.set("All")
+        self.current_page = 1
         self.perform_search()
 
     def _selected_voucher(self) -> dict[str, Any] | None:
@@ -1260,6 +1324,7 @@ class VoucherApp(ctk.CTk):
             messagebox.showinfo(
                 "Voucher", f"Voucher {voucher['voucher_id']} created.", parent=self
             )
+        self.current_page = 1
         self.perform_search()
 
     def edit_voucher(self) -> None:
@@ -1460,3 +1525,47 @@ class VoucherApp(ctk.CTk):
         self.wait_window(dialog)
         if dialog.result:
             messagebox.showinfo("Password", "Password changed.", parent=self)
+
+    def _build_pagination(self) -> None:
+        frame = ctk.CTkFrame(self)
+        frame.pack(fill="x", padx=10, pady=(2, 4))
+
+        self.prev_button = ctk.CTkButton(
+            frame,
+            text="Previous",
+            width=100,
+            command=self.previous_page,
+        )
+        self.prev_button.pack(side="left", padx=5, pady=6)
+
+        self.page_label = ctk.CTkLabel(
+            frame,
+            text="Page 1 of 1",
+            width=180,
+        )
+        self.page_label.pack(side="left", padx=10)
+
+        self.next_button = ctk.CTkButton(
+            frame,
+            text="Next",
+            width=100,
+            command=self.next_page,
+        )
+        self.next_button.pack(side="left", padx=5)
+
+        self.record_label = ctk.CTkLabel(
+            frame,
+            text="0 records",
+        )
+        self.record_label.pack(side="right", padx=10)
+
+    def previous_page(self) -> None:
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.perform_search()
+
+
+    def next_page(self) -> None:
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self.perform_search()
