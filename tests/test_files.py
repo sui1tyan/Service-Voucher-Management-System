@@ -29,15 +29,24 @@ def test_pdf_generation(
 def test_csv_export(
     admin: dict, voucher_payload: dict, tmp_path: Path
 ) -> None:
-    database.create_voucher(voucher_payload, "owner")
+    for index in range(101):
+        payload = dict(voucher_payload)
+        payload["customer_name"] = f"Export Customer {index}"
+        database.create_voucher(payload, "owner")
+
+    filters = {"customer_name": "export customer"}
+    assert len(database.search_vouchers(filters, limit=100)) == 100
     path = Path(
-        export_vouchers_csv(tmp_path / "vouchers", database.search_vouchers())
+        export_vouchers_csv(tmp_path / "vouchers", database.iter_vouchers(filters))
     )
     assert path.suffix == ".csv"
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    assert rows[0]["voucher_id"] == "41000"
-    assert rows[0]["customer_name"] == "Test Customer"
+    assert len(rows) == 101
+    assert {row["voucher_id"] for row in rows} == {
+        str(voucher_id) for voucher_id in range(41_000, 41_101)
+    }
+    assert all(row["customer_name"].startswith("Export Customer") for row in rows)
 
 
 def test_backup_validation_and_restore(

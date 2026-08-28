@@ -121,6 +121,38 @@ def test_voucher_staff_and_commission_workflow(
     assert len(database.list_audit_entries()) >= 7
 
 
+def test_voucher_pagination_and_count_use_identical_filters(
+    admin: dict, voucher_payload: dict
+) -> None:
+    for index in range(130):
+        payload = dict(voucher_payload)
+        is_match = index < 125
+        payload.update(
+            {
+                "customer_name": f"{'Match' if is_match else 'Other'} Customer {index}",
+                "technician_name": "Alice" if is_match else "Bob",
+                "ref_bill": "BATCH-A" if is_match else "BATCH-B",
+            }
+        )
+        database.create_voucher(payload, "owner")
+
+    filters = {
+        "customer_name": "match customer",
+        "technician_name": "alice",
+        "ref_bill": "batch-a",
+        "status": "Pending",
+    }
+    first_page = database.search_vouchers(filters, limit=100, offset=0)
+    second_page = database.search_vouchers(filters, limit=100, offset=100)
+
+    assert database.count_vouchers(filters) == 125
+    assert len(first_page) == 100
+    assert len(second_page) == 25
+    assert {row["voucher_id"] for row in first_page}.isdisjoint(
+        row["voucher_id"] for row in second_page
+    )
+
+
 def test_base_voucher_id_does_not_renumber_existing_records(
     admin: dict, voucher_payload: dict
 ) -> None:
