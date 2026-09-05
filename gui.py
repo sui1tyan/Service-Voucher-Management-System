@@ -8,10 +8,10 @@ import sys
 import time
 import webbrowser
 from pathlib import Path
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any, Callable, Mapping
 
 import customtkinter as ctk
-from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from auth import validate_password_policy
 from backup_utils import create_backup, restore_backup
@@ -28,6 +28,8 @@ from config import (
 from database import (
     authenticate_user,
     change_own_password,
+    count_audit_entries,
+    count_commissions,
     count_vouchers,
     create_commission,
     create_initial_admin,
@@ -40,18 +42,21 @@ from database import (
     delete_voucher,
     force_change_password,
     get_commission,
+    get_next_voucher_id,
     get_staff,
     get_voucher,
     has_admin_user,
+    iter_commissions,
     iter_vouchers,
     list_audit_entries,
-    list_commissions,
     list_staffs,
     list_staffs_names,
     list_users,
     reset_user_password,
+    search_commissions,
     search_vouchers,
     set_base_voucher_id,
+    sum_commissions,
     update_commission,
     update_staff,
     update_user,
@@ -62,11 +67,11 @@ from export_utils import export_commissions_csv, export_vouchers_csv
 from pdf_utils import generate_voucher_pdf
 from validators import (
     ValidationError,
+    normalize_voucher_id,
     validate_commission,
     validate_staff,
     validate_voucher,
 )
-
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -347,6 +352,17 @@ class VoucherDialog(Modal):
         form.grid_columnconfigure(1, weight=1)
 
         row = 0
+        ctk.CTkLabel(form, text="Voucher ID (digits)").grid(
+            row=row, column=0, sticky="w", padx=8, pady=6
+        )
+        self.voucher_id_entry = ctk.CTkEntry(form)
+        self.voucher_id_entry.grid(
+            row=row, column=1, sticky="ew", padx=8, pady=6
+        )
+        suggested_id = str(self.voucher.get("voucher_id") or get_next_voucher_id())
+        self.voucher_id_entry.insert(0, suggested_id)
+        row += 1
+
         for field, label in self.ENTRY_FIELDS:
             ctk.CTkLabel(form, text=label).grid(
                 row=row, column=0, sticky="w", padx=8, pady=6
@@ -392,6 +408,17 @@ class VoucherDialog(Modal):
             self.textboxes[field] = textbox
             row += 1
 
+        ctk.CTkLabel(
+            form,
+            text=(
+                "Commission sync: a reference bill plus a technician matching a "
+                "Staff record automatically creates or updates the linked commission."
+            ),
+            justify="left",
+            wraplength=560,
+            text_color="#555555",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+
         buttons = ctk.CTkFrame(outer, fg_color="transparent")
         buttons.pack(fill="x", padx=8, pady=8)
         ctk.CTkButton(buttons, text="Save", command=self._save).pack(
@@ -414,8 +441,17 @@ class VoucherDialog(Modal):
         payload["recipient"] = self.recipient.get()
         payload["staff_name"] = self.recipient.get()
         payload["status"] = self.status.get()
+        payload["voucher_id"] = self.voucher_id_entry.get()
         try:
-            self.result = validate_voucher(payload)
+            validated = validate_voucher(payload)
+            supplied_id = str(payload["voucher_id"]).strip()
+            existing_id = str(self.voucher.get("voucher_id") or "")
+            validated["voucher_id"] = (
+                existing_id
+                if existing_id and supplied_id == existing_id
+                else normalize_voucher_id(supplied_id)
+            )
+            self.result = validated
         except ValidationError as exc:
             messagebox.showerror("Voucher", str(exc), parent=self)
             return
@@ -830,6 +866,16 @@ class CommissionEditorDialog(Modal):
             entry.pack(fill="x", padx=6, pady=(2, 8))
             entry.insert(0, str(self.commission.get(field) or ""))
             self.entries[field] = entry
+        ctk.CTkLabel(
+            frame,
+            text=(
+                "For linked records, voucher billing and technician values are the "
+                "source of truth whenever that voucher is saved."
+            ),
+            justify="left",
+            wraplength=470,
+            text_color="#555555",
+        ).pack(fill="x", padx=6, pady=(4, 0))
         ctk.CTkButton(frame, text="Save", command=self._save).pack(
             fill="x", padx=6, pady=12
         )
@@ -851,11 +897,51 @@ class CommissionEditorDialog(Modal):
 
 class CommissionManagementDialog(Modal):
     def __init__(self, master: Any, actor: str) -> None:
-        super().__init__(master, "Commission Management", "1080x620")
+        super().__init__(master, "Commission Management", "1180x720")
         self.actor = actor
         self.rows: list[dict[str, Any]] = []
+        self.page_size = 100
+        self.current_page = 1
+        self.total_records = 0
+        self.total_pages = 1
+        self.sort_desc = True
+
+        filters = ctk.CTkFrame(self)
+        filters.pack(fill="x", padx=12, pady=(12, 4))
+        self.query_entry = ctk.CTkEntry(
+            filters,
+            placeholder_text="Staff, bill number, or voucher ID",
+            width=260,
+        )
+        self.query_entry.pack(side="left", padx=4, pady=8)
+        self.bill_type_filter = ctk.CTkComboBox(
+            filters, values=["All", *BILL_TYPES], width=90
+        )
+        self.bill_type_filter.set("All")
+        self.bill_type_filter.pack(side="left", padx=4)
+        self.commission_date_from = ctk.CTkEntry(
+            filters, placeholder_text="Date from YYYY-MM-DD", width=170
+        )
+        self.commission_date_from.pack(side="left", padx=4)
+        self.commission_date_to = ctk.CTkEntry(
+            filters, placeholder_text="Date to YYYY-MM-DD", width=170
+        )
+        self.commission_date_to.pack(side="left", padx=4)
+        ctk.CTkButton(
+            filters, text="Search", width=90, command=self.search_from_first_page
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            filters,
+            text="Reset",
+            width=80,
+            fg_color="#666666",
+            command=self.reset_filters,
+        ).pack(side="left", padx=4)
+
+        table_frame = ctk.CTkFrame(self)
+        table_frame.pack(fill="both", expand=True, padx=12, pady=(4, 6))
         self.tree = ttk.Treeview(
-            self,
+            table_frame,
             columns=(
                 "ID",
                 "Created",
@@ -880,7 +966,26 @@ class CommissionManagementDialog(Modal):
         ):
             self.tree.heading(column, text=column)
             self.tree.column(column, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        self.tree.heading("ID", command=self._toggle_id_sort)
+        commission_scroll = ttk.Scrollbar(
+            table_frame, orient="vertical", command=self.tree.yview
+        )
+        self.tree.configure(yscrollcommand=commission_scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        commission_scroll.pack(side="right", fill="y")
+
+        pagination = ctk.CTkFrame(self)
+        pagination.pack(fill="x", padx=12, pady=(0, 4))
+        self.prev_button = ctk.CTkButton(
+            pagination, text="Previous", width=100, command=self.previous_page
+        )
+        self.prev_button.pack(side="left", padx=4, pady=6)
+        self.page_label = ctk.CTkLabel(pagination, text="Page 1 of 1", width=160)
+        self.page_label.pack(side="left", padx=8)
+        self.next_button = ctk.CTkButton(
+            pagination, text="Next", width=100, command=self.next_page
+        )
+        self.next_button.pack(side="left", padx=4)
         self.total_label = ctk.CTkLabel(self, text="")
         self.total_label.pack(anchor="e", padx=16)
         controls = ctk.CTkFrame(self)
@@ -897,8 +1002,52 @@ class CommissionManagementDialog(Modal):
             )
         self.refresh()
 
+    def _filters(self) -> dict[str, str]:
+        return {
+            "query": self.query_entry.get().strip(),
+            "bill_type": self.bill_type_filter.get(),
+            "date_from": self.commission_date_from.get().strip(),
+            "date_to": self.commission_date_to.get().strip(),
+        }
+
+    def search_from_first_page(self) -> None:
+        self.current_page = 1
+        self.refresh()
+
+    def reset_filters(self) -> None:
+        self.query_entry.delete(0, "end")
+        self.bill_type_filter.set("All")
+        self.commission_date_from.delete(0, "end")
+        self.commission_date_to.delete(0, "end")
+        self.current_page = 1
+        self.refresh()
+
+    def _toggle_id_sort(self) -> None:
+        self.sort_desc = not self.sort_desc
+        self.current_page = 1
+        self.refresh()
+
     def refresh(self) -> None:
-        self.rows = list_commissions()
+        filters = self._filters()
+        try:
+            self.total_records = count_commissions(filters)
+            self.total_pages = max(
+                1, (self.total_records + self.page_size - 1) // self.page_size
+            )
+            if self.current_page > self.total_pages:
+                self.current_page = self.total_pages
+            self.rows = search_commissions(
+                filters,
+                limit=self.page_size,
+                offset=(self.current_page - 1) * self.page_size,
+                sort_direction="desc" if self.sort_desc else "asc",
+            )
+            filtered_total = sum_commissions(filters)
+        except Exception as exc:
+            logger.exception("Commission search failed")
+            messagebox.showerror("Commission", str(exc), parent=self)
+            return
+
         self.tree.delete(*self.tree.get_children())
         for row in self.rows:
             self.tree.insert(
@@ -915,8 +1064,35 @@ class CommissionManagementDialog(Modal):
                     f"{float(row.get('commission_amount') or 0):.2f}",
                 ),
             )
-        total = sum(float(row.get("commission_amount") or 0) for row in self.rows)
-        self.total_label.configure(text=f"Total commission: RM {total:,.2f}")
+        arrow = "↓" if self.sort_desc else "↑"
+        self.tree.heading("ID", text=f"ID {arrow}")
+        self.page_label.configure(
+            text=f"Page {self.current_page} of {self.total_pages}"
+        )
+        self.total_label.configure(
+            text=(
+                f"{self.total_records:,} matching records · "
+                f"Total commission: RM {filtered_total:,.2f}"
+            )
+        )
+        self.prev_button.configure(
+            state="disabled" if self.current_page <= 1 else "normal"
+        )
+        self.next_button.configure(
+            state=(
+                "disabled" if self.current_page >= self.total_pages else "normal"
+            )
+        )
+
+    def previous_page(self) -> None:
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.refresh()
+
+    def next_page(self) -> None:
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self.refresh()
 
     def _add(self) -> None:
         if not list_staffs():
@@ -931,6 +1107,8 @@ class CommissionManagementDialog(Modal):
                 create_commission(dialog.result, self.actor)
             except ValueError as exc:
                 messagebox.showerror("Commission", str(exc), parent=self)
+            else:
+                self.current_page = 1
             self.refresh()
 
     def _edit(self) -> None:
@@ -963,22 +1141,66 @@ class CommissionManagementDialog(Modal):
         self.refresh()
 
     def _export(self) -> None:
+        filters = self._filters()
+        try:
+            matching_records = count_commissions(filters)
+        except Exception as exc:
+            logger.exception("Counting commissions for CSV export failed")
+            messagebox.showerror("Export", str(exc), parent=self)
+            return
+        if matching_records == 0:
+            messagebox.showinfo(
+                "Export",
+                "There are no commissions matching the current filters.",
+                parent=self,
+            )
+            return
+
         destination = filedialog.asksaveasfilename(
             parent=self,
-            title="Export commissions",
+            title="Export all filtered commissions",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
         )
-        if destination:
-            path = export_commissions_csv(destination, self.rows)
-            messagebox.showinfo("Export", f"Saved to:\n{path}", parent=self)
+        if not destination:
+            return
+
+        exported_count = 0
+
+        def all_matching_rows():
+            nonlocal exported_count
+            for row in iter_commissions(
+                filters,
+                sort_direction="desc" if self.sort_desc else "asc",
+            ):
+                exported_count += 1
+                yield row
+
+        try:
+            path = export_commissions_csv(destination, all_matching_rows())
+        except Exception as exc:
+            logger.exception("Commission CSV export failed")
+            messagebox.showerror("Export", str(exc), parent=self)
+            return
+        messagebox.showinfo(
+            "Export",
+            f"Exported {exported_count:,} matching commissions from all pages.\n\n"
+            f"Saved to:\n{path}",
+            parent=self,
+        )
 
 
 class AuditLogDialog(Modal):
     def __init__(self, master: Any) -> None:
-        super().__init__(master, "Audit Log", "1080x620")
-        tree = ttk.Treeview(
-            self,
+        super().__init__(master, "Audit Log", "1080x680")
+        self.page_size = 100
+        self.current_page = 1
+        self.total_records = 0
+        self.total_pages = 1
+        table_frame = ctk.CTkFrame(self)
+        table_frame.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        self.tree = ttk.Treeview(
+            table_frame,
             columns=("Time", "User", "Action", "Entity", "ID", "Details"),
             show="headings",
         )
@@ -990,11 +1212,54 @@ class AuditLogDialog(Modal):
             ("ID", 90),
             ("Details", 380),
         ):
-            tree.heading(column, text=column)
-            tree.column(column, width=width, anchor="w")
-        tree.pack(fill="both", expand=True, padx=12, pady=12)
-        for row in list_audit_entries():
-            tree.insert(
+            self.tree.heading(column, text=column)
+            self.tree.column(column, width=width, anchor="w")
+        audit_scroll = ttk.Scrollbar(
+            table_frame, orient="vertical", command=self.tree.yview
+        )
+        self.tree.configure(yscrollcommand=audit_scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        audit_scroll.pack(side="right", fill="y")
+
+        controls = ctk.CTkFrame(self)
+        controls.pack(fill="x", padx=12, pady=(0, 12))
+        self.prev_button = ctk.CTkButton(
+            controls, text="Previous", width=100, command=self.previous_page
+        )
+        self.prev_button.pack(side="left", padx=4, pady=7)
+        self.page_label = ctk.CTkLabel(controls, text="Page 1 of 1", width=160)
+        self.page_label.pack(side="left", padx=8)
+        self.next_button = ctk.CTkButton(
+            controls, text="Next", width=100, command=self.next_page
+        )
+        self.next_button.pack(side="left", padx=4)
+        ctk.CTkButton(
+            controls, text="Refresh", width=100, command=self.refresh
+        ).pack(side="right", padx=4)
+        self.record_label = ctk.CTkLabel(controls, text="0 entries")
+        self.record_label.pack(side="right", padx=12)
+        self.refresh()
+
+    def refresh(self) -> None:
+        try:
+            self.total_records = count_audit_entries()
+            self.total_pages = max(
+                1, (self.total_records + self.page_size - 1) // self.page_size
+            )
+            if self.current_page > self.total_pages:
+                self.current_page = self.total_pages
+            rows = list_audit_entries(
+                self.page_size,
+                offset=(self.current_page - 1) * self.page_size,
+            )
+        except Exception as exc:
+            logger.exception("Audit log refresh failed")
+            messagebox.showerror("Audit Log", str(exc), parent=self)
+            return
+
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            self.tree.insert(
                 "",
                 "end",
                 values=(
@@ -1006,6 +1271,28 @@ class AuditLogDialog(Modal):
                     row.get("details") or "",
                 ),
             )
+        self.page_label.configure(
+            text=f"Page {self.current_page} of {self.total_pages}"
+        )
+        self.record_label.configure(text=f"{self.total_records:,} entries")
+        self.prev_button.configure(
+            state="disabled" if self.current_page <= 1 else "normal"
+        )
+        self.next_button.configure(
+            state=(
+                "disabled" if self.current_page >= self.total_pages else "normal"
+            )
+        )
+
+    def previous_page(self) -> None:
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.refresh()
+
+    def next_page(self) -> None:
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self.refresh()
 
 
 class VoucherApp(ctk.CTk):
@@ -1022,6 +1309,7 @@ class VoucherApp(ctk.CTk):
         self.current_page = 1
         self.total_records = 0
         self.total_pages = 1
+        self.voucher_sort_desc = True
 
         if not has_admin_user() and not self._first_run_setup():
             self.destroy()
@@ -1128,6 +1416,9 @@ class VoucherApp(ctk.CTk):
             side="left", padx=4
         )
         ctk.CTkButton(
+            filters, text="Refresh", width=90, command=self.perform_search
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
             filters, text="Reset", width=80, fg_color="#666666", command=self.reset_filters
         ).pack(side="left", padx=4)
 
@@ -1150,6 +1441,7 @@ class VoucherApp(ctk.CTk):
         for column, width in zip(columns, widths):
             self.tree.heading(column, text=column)
             self.tree.column(column, width=width, anchor="w")
+        self.tree.heading("ID", command=self._toggle_voucher_id_sort)
         y_scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
@@ -1216,6 +1508,7 @@ class VoucherApp(ctk.CTk):
                 filters,
                 limit=self.page_size,
                 offset=offset,
+                sort_direction="desc" if self.voucher_sort_desc else "asc",
             )
 
         except Exception as exc:
@@ -1254,6 +1547,8 @@ class VoucherApp(ctk.CTk):
                 ),
             )
 
+        arrow = "↓" if self.voucher_sort_desc else "↑"
+        self.tree.heading("ID", text=f"ID {arrow}")
         self._update_pagination_controls()
 
     def _update_pagination_controls(self) -> None:
@@ -1286,6 +1581,11 @@ class VoucherApp(ctk.CTk):
         self.current_page = 1
         self.perform_search()
 
+    def _toggle_voucher_id_sort(self) -> None:
+        self.voucher_sort_desc = not self.voucher_sort_desc
+        self.current_page = 1
+        self.perform_search()
+
     def _selected_voucher(self) -> dict[str, Any] | None:
         selection = self.tree.selection()
         if not selection:
@@ -1308,6 +1608,20 @@ class VoucherApp(ctk.CTk):
             str(voucher["voucher_id"]), path, str(self.user["username"])
         )
         return path
+
+    @staticmethod
+    def _delete_managed_pdf(path: str, *, except_path: str = "") -> None:
+        if not path:
+            return
+        target = Path(path).resolve()
+        pdf_root = Path(PDF_DIR).resolve()
+        kept = Path(except_path).resolve() if except_path else None
+        if (
+            target.is_file()
+            and target.is_relative_to(pdf_root)
+            and (kept is None or target != kept)
+        ):
+            target.unlink()
 
     def add_voucher(self) -> None:
         assert self.user is not None
@@ -1337,16 +1651,27 @@ class VoucherApp(ctk.CTk):
         self.wait_window(dialog)
         if not dialog.result:
             return
+        previous_id = str(voucher["voucher_id"])
+        previous_pdf = str(voucher.get("pdf_path") or "")
         try:
             updated = update_voucher(
-                str(voucher["voucher_id"]),
+                previous_id,
                 dialog.result,
                 str(self.user["username"]),
             )
-            self._save_pdf_for(updated)
+            new_pdf = self._save_pdf_for(updated)
+            if str(updated["voucher_id"]) != previous_id:
+                self._delete_managed_pdf(previous_pdf, except_path=new_pdf)
         except (ValueError, ValidationError, OSError) as exc:
             logger.exception("Voucher update failed")
             messagebox.showerror("Voucher", str(exc), parent=self)
+        else:
+            if str(updated["voucher_id"]) != previous_id:
+                messagebox.showinfo(
+                    "Voucher",
+                    f"Voucher ID changed from {previous_id} to {updated['voucher_id']}.",
+                    parent=self,
+                )
         self.perform_search()
 
     def update_status(self) -> None:
@@ -1385,11 +1710,7 @@ class VoucherApp(ctk.CTk):
             pdf_path = delete_voucher(
                 str(voucher["voucher_id"]), str(self.user["username"])
             )
-            if pdf_path:
-                target = Path(pdf_path).resolve()
-                pdf_root = Path(PDF_DIR).resolve()
-                if target.is_file() and target.is_relative_to(pdf_root):
-                    target.unlink()
+            self._delete_managed_pdf(pdf_path)
         except (ValueError, OSError) as exc:
             messagebox.showerror("Voucher", str(exc), parent=self)
         self.perform_search()
@@ -1450,7 +1771,10 @@ class VoucherApp(ctk.CTk):
 
         def all_matching_rows():
             nonlocal exported_count
-            for row in iter_vouchers(filters):
+            for row in iter_vouchers(
+                filters,
+                sort_direction="desc" if self.voucher_sort_desc else "asc",
+            ):
                 exported_count += 1
                 yield row
 

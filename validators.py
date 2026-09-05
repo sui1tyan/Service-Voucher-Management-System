@@ -8,12 +8,28 @@ from typing import Any, Mapping
 
 from config import BILL_TYPES, VOUCHER_STATUSES
 
-
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{3,23}[0-9]$")
+MAX_VOUCHER_ID = 999_999_999
 
 
 class ValidationError(ValueError):
     """Raised when a business record cannot be safely persisted."""
+
+
+def normalize_voucher_id(value: Any, *, optional: bool = False) -> str:
+    """Return a canonical numeric voucher ID suitable for storage and sorting."""
+
+    voucher_id = clean_text(value, limit=20)
+    if not voucher_id and optional:
+        return ""
+    if not voucher_id.isdigit():
+        raise ValidationError("Voucher ID must contain digits only.")
+    numeric_id = int(voucher_id)
+    if not 1 <= numeric_id <= MAX_VOUCHER_ID:
+        raise ValidationError(
+            f"Voucher ID must be between 1 and {MAX_VOUCHER_ID:,}."
+        )
+    return str(numeric_id)
 
 
 def clean_text(value: Any, *, limit: int = 2_000) -> str:
@@ -80,6 +96,13 @@ def validate_voucher(data: Mapping[str, Any]) -> dict[str, Any]:
     if status not in VOUCHER_STATUSES:
         raise ValidationError("Select a valid voucher status.")
 
+    amount_rm = _non_negative_number(data.get("amount_rm"), "Amount")
+    tech_commission = _non_negative_number(
+        data.get("tech_commission"), "Technician commission"
+    )
+    if tech_commission > amount_rm:
+        raise ValidationError("Technician commission cannot exceed the amount.")
+
     return {
         "customer_name": customer_name,
         "contact_number": normalize_phone(data.get("contact_number")),
@@ -94,10 +117,8 @@ def validate_voucher(data: Mapping[str, Any]) -> dict[str, Any]:
         "technician_name": clean_text(data.get("technician_name"), limit=120),
         "ref_bill": clean_text(data.get("ref_bill"), limit=60),
         "ref_bill_date": normalize_date(data.get("ref_bill_date"), optional=True),
-        "amount_rm": _non_negative_number(data.get("amount_rm"), "Amount"),
-        "tech_commission": _non_negative_number(
-            data.get("tech_commission"), "Technician commission"
-        ),
+        "amount_rm": amount_rm,
+        "tech_commission": tech_commission,
     }
 
 
