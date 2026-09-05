@@ -6,6 +6,7 @@ from validators import (
     ValidationError,
     normalize_date,
     normalize_phone,
+    normalize_voucher_id,
     validate_commission,
     validate_voucher,
 )
@@ -23,6 +24,19 @@ def test_voucher_requires_business_fields(voucher_payload: dict) -> None:
     invalid = dict(voucher_payload)
     invalid["customer_name"] = ""
     with pytest.raises(ValidationError, match="Customer name"):
+        validate_voucher(invalid)
+
+
+def test_voucher_id_and_commission_values_are_validated(
+    voucher_payload: dict,
+) -> None:
+    assert normalize_voucher_id("0041000") == "41000"
+    with pytest.raises(ValidationError, match="digits only"):
+        normalize_voucher_id("SV-41000")
+
+    invalid = dict(voucher_payload)
+    invalid.update({"amount_rm": 10, "tech_commission": 11})
+    with pytest.raises(ValidationError, match="cannot exceed"):
         validate_voucher(invalid)
 
 

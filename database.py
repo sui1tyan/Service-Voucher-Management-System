@@ -16,10 +16,15 @@ from auth import (
     verify_pwd,
 )
 from config import DB_FILE, DEFAULT_BASE_VID, ROLES, logger
-from validators import validate_commission, validate_staff, validate_voucher
+from validators import (
+    MAX_VOUCHER_ID,
+    normalize_voucher_id,
+    validate_commission,
+    validate_staff,
+    validate_voucher,
+)
 
-
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 VOUCHER_FIELDS = (
     "customer_name",
@@ -86,11 +91,11 @@ def _ensure_column(
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
-def init_db() -> None:
+def init_db(db_file: str | Path | None = None) -> None:
     """Create a new database or safely migrate an older SVMS database."""
 
     try:
-        with db_session() as conn:
+        with db_session(db_file) as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS vouchers (
@@ -163,7 +168,8 @@ def init_db() -> None:
                     created_at TEXT,
                     updated_at TEXT,
                     voucher_id TEXT,
-                    note TEXT
+                    note TEXT,
+                    managed_by_voucher INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS audit_log (
@@ -180,6 +186,23 @@ def init_db() -> None:
 
             migrations = {
                 "vouchers": {
+                    "created_at": "TEXT",
+                    "customer_name": "TEXT",
+                    "contact_number": "TEXT",
+                    "units": "INTEGER NOT NULL DEFAULT 1",
+                    "particulars": "TEXT",
+                    "problem": "TEXT",
+                    "staff_name": "TEXT",
+                    "status": "TEXT NOT NULL DEFAULT 'Pending'",
+                    "recipient": "TEXT",
+                    "solution": "TEXT",
+                    "pdf_path": "TEXT",
+                    "technician_id": "TEXT",
+                    "technician_name": "TEXT",
+                    "ref_bill": "TEXT",
+                    "ref_bill_date": "TEXT",
+                    "amount_rm": "REAL NOT NULL DEFAULT 0",
+                    "tech_commission": "REAL NOT NULL DEFAULT 0",
                     "updated_at": "TEXT",
                     "created_by": "TEXT",
                     "updated_by": "TEXT",
@@ -192,7 +215,11 @@ def init_db() -> None:
                     "note": "TEXT",
                     "last_login": "TEXT",
                 },
-                "commissions": {"voucher_id": "TEXT", "note": "TEXT"},
+                "commissions": {
+                    "voucher_id": "TEXT",
+                    "note": "TEXT",
+                    "managed_by_voucher": "INTEGER NOT NULL DEFAULT 0",
+                },
             }
             for table, columns in migrations.items():
                 for column, definition in columns.items():
@@ -212,6 +239,10 @@ def init_db() -> None:
                     ON commissions(staff_id);
                 CREATE INDEX IF NOT EXISTS idx_commissions_voucher
                     ON commissions(voucher_id);
+                CREATE INDEX IF NOT EXISTS idx_commissions_created_at
+                    ON commissions(created_at);
+                CREATE INDEX IF NOT EXISTS idx_commissions_bill
+                    ON commissions(bill_type, bill_no COLLATE NOCASE);
                 CREATE INDEX IF NOT EXISTS idx_audit_occurred_at
                     ON audit_log(occurred_at);
                 """
@@ -220,6 +251,7 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO settings(key, value) VALUES('base_vid', ?)",
                 (str(DEFAULT_BASE_VID),),
             )
+            _ensure_next_voucher_id_setting(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         logger.info("Database initialized (schema version %s).", SCHEMA_VERSION)
     except Exception:
@@ -518,6 +550,63 @@ def delete_user(user_id: int, actor_user_id: int, actor: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _integer_setting(conn: sqlite3.Connection, key: str, default: int) -> int:
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    try:
+        return int(row["value"]) if row else int(default)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _maximum_numeric_voucher_id(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute(
+        """
+        SELECT MAX(CAST(voucher_id AS INTEGER))
+        FROM vouchers
+        WHERE voucher_id <> '' AND voucher_id NOT GLOB '*[^0-9]*'
+        """
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def _ensure_next_voucher_id_setting(conn: sqlite3.Connection) -> int:
+    """Migrate and maintain the monotonic next voucher ID setting."""
+
+    base = _integer_setting(conn, "base_vid", DEFAULT_BASE_VID)
+    if not 1 <= base <= MAX_VOUCHER_ID:
+        base = DEFAULT_BASE_VID
+        conn.execute(
+            """
+            INSERT INTO settings(key, value) VALUES('base_vid', ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (str(base),),
+        )
+
+    maximum = _maximum_numeric_voucher_id(conn)
+    existing_next = _integer_setting(conn, "next_vid", base)
+    candidate = max(base, existing_next, (maximum + 1) if maximum is not None else base)
+    conn.execute(
+        """
+        INSERT INTO settings(key, value) VALUES('next_vid', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (str(candidate),),
+    )
+    return candidate
+
+
+def _advance_next_voucher_id_setting(
+    conn: sqlite3.Connection, minimum_next: int
+) -> None:
+    current = _ensure_next_voucher_id_setting(conn)
+    if int(minimum_next) > current:
+        conn.execute(
+            "UPDATE settings SET value=? WHERE key='next_vid'",
+            (str(int(minimum_next)),),
+        )
+
+
 def get_setting(key: str, default: str = "") -> str:
     with db_session() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
@@ -525,7 +614,7 @@ def get_setting(key: str, default: str = "") -> str:
 
 
 def set_base_voucher_id(value: int, actor: str) -> None:
-    if not 1 <= int(value) <= 999_999_999:
+    if not 1 <= int(value) <= MAX_VOUCHER_ID:
         raise ValueError("Base voucher ID must be between 1 and 999,999,999.")
     with db_session() as conn:
         conn.execute(
@@ -535,23 +624,15 @@ def set_base_voucher_id(value: int, actor: str) -> None:
             """,
             (str(int(value)),),
         )
+        _advance_next_voucher_id_setting(conn, int(value))
         _audit(conn, actor, "base_voucher_id_updated", "settings", "base_vid", {"value": value})
 
 
 def _next_voucher_id(conn: sqlite3.Connection) -> str:
-    row = conn.execute(
-        """
-        SELECT MAX(CAST(voucher_id AS INTEGER))
-        FROM vouchers
-        WHERE voucher_id <> '' AND voucher_id NOT GLOB '*[^0-9]*'
-        """
-    ).fetchone()
-    base = int(
-        conn.execute(
-            "SELECT value FROM settings WHERE key='base_vid'"
-        ).fetchone()["value"]
-    )
-    return str(max(base, (int(row[0]) + 1) if row and row[0] is not None else base))
+    candidate = _ensure_next_voucher_id_setting(conn)
+    if candidate > MAX_VOUCHER_ID:
+        raise ValueError("No more numeric voucher IDs are available.")
+    return str(candidate)
 
 
 def get_next_voucher_id() -> str:
@@ -559,30 +640,217 @@ def get_next_voucher_id() -> str:
         return _next_voucher_id(conn)
 
 
+def _resolve_voucher_staff_id(
+    conn: sqlite3.Connection, voucher: Mapping[str, Any]
+) -> int | None:
+    voucher_data = dict(voucher)
+    technician_id = str(voucher_data.get("technician_id") or "").strip()
+    if technician_id:
+        row = conn.execute(
+            """
+            SELECT id FROM staffs
+            WHERE LOWER(TRIM(COALESCE(staff_id_opt, ''))) = LOWER(?)
+            ORDER BY id LIMIT 1
+            """,
+            (technician_id,),
+        ).fetchone()
+        if row:
+            return int(row["id"])
+
+    technician_name = str(voucher_data.get("technician_name") or "").strip()
+    if technician_name:
+        row = conn.execute(
+            """
+            SELECT id FROM staffs
+            WHERE LOWER(TRIM(name)) = LOWER(?)
+            ORDER BY id LIMIT 1
+            """,
+            (technician_name,),
+        ).fetchone()
+        if row:
+            return int(row["id"])
+    return None
+
+
+def _bill_type_from_reference(reference: str) -> str:
+    return "INV" if reference.strip().upper().startswith("INV") else "CS"
+
+
+def _sync_commission_from_voucher(
+    conn: sqlite3.Connection, voucher_id: str, actor: str
+) -> None:
+    """Make the voucher the source of truth for its linked commission."""
+
+    voucher = conn.execute(
+        "SELECT * FROM vouchers WHERE voucher_id=?", (str(voucher_id),)
+    ).fetchone()
+    if voucher is None:
+        return
+
+    linked = conn.execute(
+        """
+        SELECT * FROM commissions
+        WHERE voucher_id=?
+        ORDER BY managed_by_voucher DESC, id
+        """,
+        (str(voucher_id),),
+    ).fetchall()
+    staff_id = _resolve_voucher_staff_id(conn, voucher)
+    bill_no = str(voucher["ref_bill"] or "").strip()
+
+    if staff_id is None or not bill_no:
+        for commission in linked:
+            commission_id = int(commission["id"])
+            if int(commission["managed_by_voucher"] or 0):
+                conn.execute("DELETE FROM commissions WHERE id=?", (commission_id,))
+                _audit(
+                    conn,
+                    actor,
+                    "commission_removed_after_voucher_sync",
+                    "commission",
+                    str(commission_id),
+                    {"voucher_id": str(voucher_id)},
+                )
+        return
+
+    bill_type = _bill_type_from_reference(bill_no)
+    total_amount = float(voucher["amount_rm"] or 0)
+    commission_amount = float(voucher["tech_commission"] or 0)
+    timestamp = now_text()
+
+    if not linked:
+        matching = conn.execute(
+            """
+            SELECT * FROM commissions
+            WHERE (voucher_id IS NULL OR TRIM(voucher_id)='')
+              AND staff_id=? AND bill_type=?
+              AND LOWER(TRIM(bill_no))=LOWER(?)
+            ORDER BY id
+            """,
+            (staff_id, bill_type, bill_no),
+        ).fetchall()
+        if len(matching) == 1:
+            linked = matching
+
+    if linked:
+        for commission in linked:
+            commission_id = int(commission["id"])
+            conn.execute(
+                """
+                UPDATE commissions
+                SET staff_id=?, bill_type=?, bill_no=?, total_amount=?,
+                    commission_amount=?, voucher_id=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    staff_id,
+                    bill_type,
+                    bill_no,
+                    total_amount,
+                    commission_amount,
+                    str(voucher_id),
+                    timestamp,
+                    commission_id,
+                ),
+            )
+            _audit(
+                conn,
+                actor,
+                "commission_synced_from_voucher",
+                "commission",
+                str(commission_id),
+                {"voucher_id": str(voucher_id)},
+            )
+        return
+
+    cursor = conn.execute(
+        """
+        INSERT INTO commissions
+            (staff_id, bill_type, bill_no, total_amount, commission_amount,
+             bill_image_path, created_at, updated_at, voucher_id, note,
+             managed_by_voucher)
+        VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, '', 1)
+        """,
+        (
+            staff_id,
+            bill_type,
+            bill_no,
+            total_amount,
+            commission_amount,
+            timestamp,
+            timestamp,
+            str(voucher_id),
+        ),
+    )
+    _audit(
+        conn,
+        actor,
+        "commission_created_from_voucher",
+        "commission",
+        str(cursor.lastrowid),
+        {"voucher_id": str(voucher_id)},
+    )
+
+
+def _detach_commissions_for_voucher(
+    conn: sqlite3.Connection, voucher_id: str, actor: str
+) -> None:
+    linked = conn.execute(
+        "SELECT id, managed_by_voucher FROM commissions WHERE voucher_id=?",
+        (str(voucher_id),),
+    ).fetchall()
+    for commission in linked:
+        commission_id = int(commission["id"])
+        if int(commission["managed_by_voucher"] or 0):
+            conn.execute("DELETE FROM commissions WHERE id=?", (commission_id,))
+            action = "commission_removed_with_voucher"
+        else:
+            conn.execute(
+                "UPDATE commissions SET voucher_id=NULL, updated_at=? WHERE id=?",
+                (now_text(), commission_id),
+            )
+            action = "commission_unlinked_from_deleted_voucher"
+        _audit(
+            conn,
+            actor,
+            action,
+            "commission",
+            str(commission_id),
+            {"voucher_id": str(voucher_id)},
+        )
+
+
 def create_voucher(data: Mapping[str, Any], actor: str) -> dict[str, Any]:
     values = validate_voucher(data)
+    requested_id = normalize_voucher_id(data.get("voucher_id"), optional=True)
     timestamp = now_text()
-    with db_session() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        voucher_id = _next_voucher_id(conn)
-        columns = ", ".join(VOUCHER_FIELDS)
-        placeholders = ", ".join("?" for _ in VOUCHER_FIELDS)
-        conn.execute(
-            f"""
-            INSERT INTO vouchers
-                (voucher_id, created_at, {columns}, updated_at, created_by, updated_by)
-            VALUES (?, ?, {placeholders}, ?, ?, ?)
-            """,
-            (
-                voucher_id,
-                timestamp,
-                *(values[field] for field in VOUCHER_FIELDS),
-                timestamp,
-                actor,
-                actor,
-            ),
-        )
-        _audit(conn, actor, "voucher_created", "voucher", voucher_id)
+    try:
+        with db_session() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            voucher_id = requested_id or _next_voucher_id(conn)
+            columns = ", ".join(VOUCHER_FIELDS)
+            placeholders = ", ".join("?" for _ in VOUCHER_FIELDS)
+            conn.execute(
+                f"""
+                INSERT INTO vouchers
+                    (voucher_id, created_at, {columns}, updated_at, created_by, updated_by)
+                VALUES (?, ?, {placeholders}, ?, ?, ?)
+                """,
+                (
+                    voucher_id,
+                    timestamp,
+                    *(values[field] for field in VOUCHER_FIELDS),
+                    timestamp,
+                    actor,
+                    actor,
+                ),
+            )
+            _advance_next_voucher_id_setting(conn, int(voucher_id) + 1)
+            _audit(conn, actor, "voucher_created", "voucher", voucher_id)
+            _sync_commission_from_voucher(conn, voucher_id, actor)
+    except sqlite3.IntegrityError as exc:
+        duplicate_id = requested_id or "selected"
+        raise ValueError(f"Voucher ID {duplicate_id} already exists.") from exc
     return get_voucher(voucher_id)  # type: ignore[return-value]
 
 
@@ -637,18 +905,32 @@ def _voucher_filter_clause(
     return f" WHERE {' AND '.join(clauses)}", params
 
 
+def _voucher_order_clause(sort_direction: str) -> str:
+    direction = str(sort_direction).lower()
+    if direction not in {"asc", "desc"}:
+        raise ValueError("Voucher sort direction must be 'asc' or 'desc'.")
+    sql_direction = direction.upper()
+    numeric = "voucher_id <> '' AND voucher_id NOT GLOB '*[^0-9]*'"
+    return (
+        f" ORDER BY CASE WHEN {numeric} THEN 0 ELSE 1 END ASC,"
+        f" CASE WHEN {numeric} THEN CAST(voucher_id AS INTEGER) END {sql_direction},"
+        f" voucher_id COLLATE NOCASE {sql_direction}, id {sql_direction}"
+    )
+
+
 def search_vouchers(
     filters: Mapping[str, Any] | None = None,
     *,
     limit: int = 100,
     offset: int = 0,
+    sort_direction: str = "desc",
 ) -> list[dict[str, Any]]:
     page_limit = max(1, min(int(limit), 5_000))
     page_offset = max(0, int(offset))
     where_clause, params = _voucher_filter_clause(filters)
     sql = (
-        f"SELECT * FROM vouchers{where_clause} "
-        "ORDER BY datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?"
+        f"SELECT * FROM vouchers{where_clause}"
+        f"{_voucher_order_clause(sort_direction)} LIMIT ? OFFSET ?"
     )
     params.extend((page_limit, page_offset))
     with db_session() as conn:
@@ -670,14 +952,15 @@ def iter_vouchers(
     filters: Mapping[str, Any] | None = None,
     *,
     batch_size: int = 1_000,
+    sort_direction: str = "desc",
 ) -> Iterator[dict[str, Any]]:
     """Yield every matching voucher in stable order without page-size limits."""
 
     fetch_size = max(1, min(int(batch_size), 5_000))
     where_clause, params = _voucher_filter_clause(filters)
     sql = (
-        f"SELECT * FROM vouchers{where_clause} "
-        "ORDER BY datetime(created_at) DESC, id DESC"
+        f"SELECT * FROM vouchers{where_clause}"
+        f"{_voucher_order_clause(sort_direction)}"
     )
 
     with db_session() as conn:
@@ -691,24 +974,48 @@ def update_voucher(
     voucher_id: str, data: Mapping[str, Any], actor: str
 ) -> dict[str, Any]:
     values = validate_voucher(data)
-    assignments = ", ".join(f"{field}=?" for field in VOUCHER_FIELDS)
-    with db_session() as conn:
-        cursor = conn.execute(
-            f"""
-            UPDATE vouchers SET {assignments}, updated_at=?, updated_by=?
-            WHERE voucher_id=?
-            """,
-            (
-                *(values[field] for field in VOUCHER_FIELDS),
-                now_text(),
+    old_id = str(voucher_id)
+    supplied_id = str(data.get("voucher_id", old_id)).strip()
+    new_id = old_id if supplied_id == old_id else normalize_voucher_id(supplied_id)
+    assignments = [f"{field}=?" for field in VOUCHER_FIELDS]
+    parameters: list[Any] = [values[field] for field in VOUCHER_FIELDS]
+    if new_id != old_id:
+        assignments.extend(("voucher_id=?", "pdf_path=''"))
+        parameters.append(new_id)
+    assignments.extend(("updated_at=?", "updated_by=?"))
+    parameters.extend((now_text(), actor, old_id))
+
+    try:
+        with db_session() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM vouchers WHERE voucher_id=?", (old_id,)
+            ).fetchone() is None:
+                raise ValueError("Voucher not found.")
+            cursor = conn.execute(
+                f"UPDATE vouchers SET {', '.join(assignments)} WHERE voucher_id=?",
+                parameters,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Voucher not found.")
+            if new_id != old_id:
+                conn.execute(
+                    "UPDATE commissions SET voucher_id=?, updated_at=? WHERE voucher_id=?",
+                    (new_id, now_text(), old_id),
+                )
+                _advance_next_voucher_id_setting(conn, int(new_id) + 1)
+            _audit(
+                conn,
                 actor,
-                str(voucher_id),
-            ),
-        )
-        if cursor.rowcount != 1:
-            raise ValueError("Voucher not found.")
-        _audit(conn, actor, "voucher_updated", "voucher", str(voucher_id))
-    return get_voucher(str(voucher_id))  # type: ignore[return-value]
+                "voucher_updated",
+                "voucher",
+                new_id,
+                {"previous_voucher_id": old_id} if new_id != old_id else None,
+            )
+            _sync_commission_from_voucher(conn, new_id, actor)
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"Voucher ID {new_id} already exists.") from exc
+    return get_voucher(new_id)  # type: ignore[return-value]
 
 
 def update_voucher_pdf_path(voucher_id: str, pdf_path: str, actor: str) -> None:
@@ -731,6 +1038,7 @@ def delete_voucher(voucher_id: str, actor: str) -> str:
         ).fetchone()
         if row is None:
             raise ValueError("Voucher not found.")
+        _detach_commissions_for_voucher(conn, str(voucher_id), actor)
         conn.execute("DELETE FROM vouchers WHERE voucher_id=?", (str(voucher_id),))
         _audit(conn, actor, "voucher_deleted", "voucher", str(voucher_id))
     return str(row["pdf_path"] or "")
@@ -847,17 +1155,132 @@ def delete_staff(staff_id: int, actor: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def list_commissions() -> list[dict[str, Any]]:
+def _commission_filter_clause(
+    filters: Mapping[str, Any] | None = None,
+) -> tuple[str, list[Any]]:
+    filters = filters or {}
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    query = str(filters.get("query") or "").strip().lower()
+    if query:
+        wildcard = f"%{query}%"
+        clauses.append(
+            "(LOWER(COALESCE(s.name, '')) LIKE ? "
+            "OR LOWER(COALESCE(c.bill_no, '')) LIKE ? "
+            "OR LOWER(COALESCE(c.voucher_id, '')) LIKE ?)"
+        )
+        params.extend((wildcard, wildcard, wildcard))
+
+    for key, expression in (
+        ("staff_name", "s.name"),
+        ("bill_no", "c.bill_no"),
+        ("voucher_id", "c.voucher_id"),
+    ):
+        value = str(filters.get(key) or "").strip().lower()
+        if value:
+            clauses.append(f"LOWER(COALESCE({expression}, '')) LIKE ?")
+            params.append(f"%{value}%")
+
+    bill_type = str(filters.get("bill_type") or "").strip().upper()
+    if bill_type and bill_type != "ALL":
+        clauses.append("c.bill_type=?")
+        params.append(bill_type)
+
+    staff_id = filters.get("staff_id")
+    if staff_id not in (None, ""):
+        clauses.append("c.staff_id=?")
+        params.append(int(staff_id))
+
+    date_from = str(filters.get("date_from") or "").strip()
+    if date_from:
+        clauses.append("DATE(c.created_at) >= DATE(?)")
+        params.append(date_from)
+
+    date_to = str(filters.get("date_to") or "").strip()
+    if date_to:
+        clauses.append("DATE(c.created_at) <= DATE(?)")
+        params.append(date_to)
+
+    if not clauses:
+        return "", params
+    return f" WHERE {' AND '.join(clauses)}", params
+
+
+def _commission_order_clause(sort_direction: str) -> str:
+    direction = str(sort_direction).lower()
+    if direction not in {"asc", "desc"}:
+        raise ValueError("Commission sort direction must be 'asc' or 'desc'.")
+    return f" ORDER BY c.id {direction.upper()}"
+
+
+def search_commissions(
+    filters: Mapping[str, Any] | None = None,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    sort_direction: str = "desc",
+) -> list[dict[str, Any]]:
+    page_limit = max(1, min(int(limit), 5_000))
+    page_offset = max(0, int(offset))
+    where_clause, params = _commission_filter_clause(filters)
+    sql = (
+        "SELECT c.*, COALESCE(s.name, 'Unassigned') AS staff_name "
+        "FROM commissions c LEFT JOIN staffs s ON s.id=c.staff_id"
+        f"{where_clause}{_commission_order_clause(sort_direction)} LIMIT ? OFFSET ?"
+    )
+    params.extend((page_limit, page_offset))
     with db_session() as conn:
-        rows = conn.execute(
-            """
-            SELECT c.*, COALESCE(s.name, 'Unassigned') AS staff_name
-            FROM commissions c
-            LEFT JOIN staffs s ON s.id=c.staff_id
-            ORDER BY datetime(c.created_at) DESC, c.id DESC
-            """
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [dict(row) for row in rows]
+
+
+def count_commissions(filters: Mapping[str, Any] | None = None) -> int:
+    where_clause, params = _commission_filter_clause(filters)
+    with db_session() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM commissions c "
+            f"LEFT JOIN staffs s ON s.id=c.staff_id{where_clause}",
+            params,
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def sum_commissions(filters: Mapping[str, Any] | None = None) -> float:
+    where_clause, params = _commission_filter_clause(filters)
+    with db_session() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(c.commission_amount), 0) FROM commissions c "
+            f"LEFT JOIN staffs s ON s.id=c.staff_id{where_clause}",
+            params,
+        ).fetchone()
+    return float(row[0] or 0) if row else 0.0
+
+
+def iter_commissions(
+    filters: Mapping[str, Any] | None = None,
+    *,
+    batch_size: int = 1_000,
+    sort_direction: str = "desc",
+) -> Iterator[dict[str, Any]]:
+    fetch_size = max(1, min(int(batch_size), 5_000))
+    where_clause, params = _commission_filter_clause(filters)
+    sql = (
+        "SELECT c.*, COALESCE(s.name, 'Unassigned') AS staff_name "
+        "FROM commissions c LEFT JOIN staffs s ON s.id=c.staff_id"
+        f"{where_clause}{_commission_order_clause(sort_direction)}"
+    )
+    with db_session() as conn:
+        cursor = conn.execute(sql, params)
+        while rows := cursor.fetchmany(fetch_size):
+            for row in rows:
+                yield dict(row)
+
+
+def list_commissions() -> list[dict[str, Any]]:
+    """Compatibility helper returning every commission record."""
+
+    return list(iter_commissions())
 
 
 def get_commission(commission_id: int) -> dict[str, Any] | None:
@@ -953,10 +1376,21 @@ def delete_commission(commission_id: int, actor: str) -> None:
         _audit(conn, actor, "commission_deleted", "commission", str(commission_id))
 
 
-def list_audit_entries(limit: int = 500) -> list[dict[str, Any]]:
+def count_audit_entries() -> int:
+    with db_session() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()
+    return int(row[0]) if row else 0
+
+
+def list_audit_entries(
+    limit: int = 500, *, offset: int = 0
+) -> list[dict[str, Any]]:
     with db_session() as conn:
         rows = conn.execute(
-            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?",
-            (max(1, min(int(limit), 5_000)),),
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?",
+            (
+                max(1, min(int(limit), 5_000)),
+                max(0, int(offset)),
+            ),
         ).fetchall()
     return [dict(row) for row in rows]
