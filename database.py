@@ -594,18 +594,16 @@ def get_voucher(voucher_id: str) -> dict[str, Any] | None:
     return _dict(row)
 
 
-def search_vouchers(
+def _voucher_filter_clause(
     filters: Mapping[str, Any] | None = None,
-    *,
-    limit: int = 100,
-    offset: int = 0,
-) -> list[dict[str, Any]]:
-    
+) -> tuple[str, list[Any]]:
+    """Build the shared WHERE clause used by list, count, and export queries."""
+
     filters = filters or {}
-    sql = "SELECT * FROM vouchers WHERE 1=1"
+    clauses: list[str] = []
     params: list[Any] = []
 
-    filter_map = (
+    text_filters = (
         ("voucher_id", "voucher_id"),
         ("customer_name", "customer_name"),
         ("contact_number", "contact_number"),
@@ -613,78 +611,81 @@ def search_vouchers(
         ("technician_name", "technician_name"),
         ("ref_bill", "ref_bill"),
     )
-    for key, column in filter_map:
+    for key, column in text_filters:
         value = str(filters.get(key) or "").strip()
         if value:
-            sql += f" AND LOWER(COALESCE({column}, '')) LIKE ?"
+            clauses.append(f"LOWER(COALESCE({column}, '')) LIKE ?")
             params.append(f"%{value.lower()}%")
 
     status = str(filters.get("status") or "").strip()
-    if status and status != "All":
-        sql += " AND status=?"
+    if status and status.casefold() != "all":
+        clauses.append("status = ?")
         params.append(status)
 
     date_from = str(filters.get("date_from") or "").strip()
-    date_to = str(filters.get("date_to") or "").strip()
     if date_from:
-        sql += " AND DATE(created_at) >= DATE(?)"
+        clauses.append("DATE(created_at) >= DATE(?)")
         params.append(date_from)
+
+    date_to = str(filters.get("date_to") or "").strip()
     if date_to:
-        sql += " AND DATE(created_at) <= DATE(?)"
+        clauses.append("DATE(created_at) <= DATE(?)")
         params.append(date_to)
 
-    sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-    params.extend((limit, offset))
+    if not clauses:
+        return "", params
+    return f" WHERE {' AND '.join(clauses)}", params
+
+
+def search_vouchers(
+    filters: Mapping[str, Any] | None = None,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    page_limit = max(1, min(int(limit), 5_000))
+    page_offset = max(0, int(offset))
+    where_clause, params = _voucher_filter_clause(filters)
+    sql = (
+        f"SELECT * FROM vouchers{where_clause} "
+        "ORDER BY datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?"
+    )
+    params.extend((page_limit, page_offset))
     with db_session() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [dict(row) for row in rows]
 
-def count_vouchers(
-    filters: Mapping[str, Any] | None = None
-) -> int:
-    filters = filters or {}
-    sql = "SELECT COUNT(*) FROM vouchers WHERE 1=1"
-    params: list[Any] = []
 
-    voucher_id = str(filters.get("voucher_id") or "").strip()
-    if voucher_id:
-        sql += " AND voucher_id LIKE ?"
-        params.append(f"%{voucher_id}%")
-
-    customer_name = str(filters.get("customer_name") or "").strip()
-    if customer_name:
-        sql += " AND customer_name LIKE ? COLLATE NOCASE"
-        params.append(f"%{customer_name}%")
-
-    contact_number = str(filters.get("contact_number") or "").strip()
-    if contact_number:
-        sql += " AND contact_number LIKE ?"
-        params.append(f"%{contact_number}%")
-
-    recipient = str(filters.get("recipient") or "").strip()
-    if recipient:
-        sql += " AND recipient LIKE ? COLLATE NOCASE"
-        params.append(f"%{recipient}%")
-
-    status = str(filters.get("status") or "").strip()
-    if status and status != "All":
-        sql += " AND status = ?"
-        params.append(status)
-
-    date_from = str(filters.get("date_from") or "").strip()
-    if date_from:
-        sql += " AND DATE(created_at) >= DATE(?)"
-        params.append(date_from)
-
-    date_to = str(filters.get("date_to") or "").strip()
-    if date_to:
-        sql += " AND DATE(created_at) <= DATE(?)"
-        params.append(date_to)
-
+def count_vouchers(filters: Mapping[str, Any] | None = None) -> int:
+    where_clause, params = _voucher_filter_clause(filters)
     with db_session() as conn:
-        row = conn.execute(sql, params).fetchone()
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM vouchers{where_clause}", params
+        ).fetchone()
 
     return int(row[0]) if row else 0
+
+
+def iter_vouchers(
+    filters: Mapping[str, Any] | None = None,
+    *,
+    batch_size: int = 1_000,
+) -> Iterator[dict[str, Any]]:
+    """Yield every matching voucher in stable order without page-size limits."""
+
+    fetch_size = max(1, min(int(batch_size), 5_000))
+    where_clause, params = _voucher_filter_clause(filters)
+    sql = (
+        f"SELECT * FROM vouchers{where_clause} "
+        "ORDER BY datetime(created_at) DESC, id DESC"
+    )
+
+    with db_session() as conn:
+        cursor = conn.execute(sql, params)
+        while rows := cursor.fetchmany(fetch_size):
+            for row in rows:
+                yield dict(row)
+
 
 def update_voucher(
     voucher_id: str, data: Mapping[str, Any], actor: str

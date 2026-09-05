@@ -28,6 +28,7 @@ from config import (
 from database import (
     authenticate_user,
     change_own_password,
+    count_vouchers,
     create_commission,
     create_initial_admin,
     create_staff,
@@ -42,6 +43,7 @@ from database import (
     get_staff,
     get_voucher,
     has_admin_user,
+    iter_vouchers,
     list_audit_entries,
     list_commissions,
     list_staffs,
@@ -49,7 +51,6 @@ from database import (
     list_users,
     reset_user_password,
     search_vouchers,
-    count_vouchers,
     set_base_voucher_id,
     update_commission,
     update_staff,
@@ -1420,15 +1421,53 @@ class VoucherApp(ctk.CTk):
         self.perform_search()
 
     def export_vouchers(self) -> None:
+        filters = self._filters()
+        try:
+            matching_records = count_vouchers(filters)
+        except Exception as exc:
+            logger.exception("Counting vouchers for CSV export failed")
+            messagebox.showerror("Export", str(exc), parent=self)
+            return
+
+        if matching_records == 0:
+            messagebox.showinfo(
+                "Export",
+                "There are no vouchers matching the current filters.",
+                parent=self,
+            )
+            return
+
         destination = filedialog.asksaveasfilename(
             parent=self,
-            title="Export displayed vouchers",
+            title="Export all filtered vouchers",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
         )
-        if destination:
-            path = export_vouchers_csv(destination, self.current_rows)
-            messagebox.showinfo("Export", f"Saved to:\n{path}", parent=self)
+        if not destination:
+            return
+
+        exported_count = 0
+
+        def all_matching_rows():
+            nonlocal exported_count
+            for row in iter_vouchers(filters):
+                exported_count += 1
+                yield row
+
+        try:
+            path = export_vouchers_csv(destination, all_matching_rows())
+        except Exception as exc:
+            logger.exception("Voucher CSV export failed")
+            messagebox.showerror("Export", str(exc), parent=self)
+            return
+
+        logger.info("Voucher CSV export completed (%s records).", exported_count)
+        messagebox.showinfo(
+            "Export",
+            f"Exported {exported_count:,} matching vouchers from all pages.\n\n"
+            f"Saved to:\n{path}",
+            parent=self,
+        )
 
     def manage_staff(self) -> None:
         assert self.user is not None

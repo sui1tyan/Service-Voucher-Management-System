@@ -8,7 +8,9 @@ technician work, commissions, PDF vouchers, backups, and CSV exports.
 - Secure first-run administrator setup with no hardcoded default password.
 - Bcrypt password hashing, forced temporary-password changes, login throttling,
   active-account checks, and role-based permissions.
-- Create, search, edit, update, delete, and export service vouchers.
+- Create, search, edit, update, and delete service vouchers with database-backed
+  pagination (100 records per page).
+- Export every voucher matching the current filters to one CSV, across all pages.
 - Atomic numeric voucher allocation with a configurable minimum base number.
 - Staff and recipient management.
 - User administration with administrator safeguards.
@@ -49,15 +51,17 @@ There are no default credentials.
 |---|---|
 | Administrator | All voucher, user, staff, commission, backup, audit, and settings functions |
 | Sales assistant | Create/edit vouchers, update status, commissions, and CSV exports |
-| Technician | Update voucher status/solution and export displayed records |
-| User | View vouchers, open PDFs, and export displayed records |
+| Technician | Update voucher status/solution and export filtered records |
+| User | View vouchers, open PDFs, and export filtered records |
 
 Administrators can customize an account's role and active status from **Users**.
 New accounts receive a temporary password and must change it at next login.
 
 ## Operational data
 
-By default, data is stored beside the source files or packaged executable:
+Source builds store data beside the source files. Packaged Windows builds store
+writable data in `%LOCALAPPDATA%\TONY.COM\ServiceVoucherApp` so installed or MSIX
+application directories remain read-only:
 
 - `vouchers.db` — SQLite database
 - `pdfs/` — generated voucher PDFs
