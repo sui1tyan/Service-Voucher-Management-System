@@ -343,7 +343,8 @@ class VoucherDialog(Modal):
             master, "Edit Voucher" if voucher else "New Voucher", "760x780"
         )
         self.voucher = dict(voucher or {})
-        self.entries: dict[str, ctk.CTkEntry] = {}
+        self.entries: dict[str, ctk.CTkEntry | ctk.CTkComboBox] = {}
+        staff_names = list_staffs_names()
 
         outer = ctk.CTkFrame(self)
         outer.pack(fill="both", expand=True, padx=12, pady=12)
@@ -367,16 +368,25 @@ class VoucherDialog(Modal):
             ctk.CTkLabel(form, text=label).grid(
                 row=row, column=0, sticky="w", padx=8, pady=6
             )
-            entry = ctk.CTkEntry(form)
+            value = str(self.voucher.get(field) or ("1" if field == "units" else ""))
+            entry: ctk.CTkEntry | ctk.CTkComboBox
+            if field == "technician_name":
+                technicians = list(staff_names)
+                if value and value not in technicians:
+                    technicians.append(value)
+                entry = ctk.CTkComboBox(form, values=technicians or [""])
+                entry.set(value)
+            else:
+                entry = ctk.CTkEntry(form)
+                entry.insert(0, value)
             entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
-            entry.insert(0, str(self.voucher.get(field) or ("1" if field == "units" else "")))
             self.entries[field] = entry
             row += 1
 
         ctk.CTkLabel(form, text="Recipient").grid(
             row=row, column=0, sticky="w", padx=8, pady=6
         )
-        recipients = list_staffs_names()
+        recipients = list(staff_names)
         current_recipient = str(self.voucher.get("recipient") or "")
         if current_recipient and current_recipient not in recipients:
             recipients.append(current_recipient)
